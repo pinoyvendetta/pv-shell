@@ -8,7 +8,7 @@ ini_set('display_errors', 0);
 set_time_limit(0);
 
 // Default password hash using MD5 for 'myp@ssw0rd'
-$default_password_hash = '2516c14835697b9239a4891ac3b63a33';
+$default_password_hash = '2ebba5cd75576c408240e57110e7b4ff';
 
 $WHITELISTED_IPS = [];
 $WHITELISTED_USER_AGENTS = [];
