@@ -2,7 +2,7 @@
 session_start();
 date_default_timezone_set('Asia/Manila');
 ini_set('log_errors', 1);
-ini_set('error_log', __DIR__ . '/error_log.txt');
+ini_set('error_log', __DIR__ . '/pv-error_log');
 error_reporting(E_ALL);
 ini_set('display_errors', 0);
 set_time_limit(0);
