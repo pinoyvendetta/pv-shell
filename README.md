@@ -1,4 +1,4 @@
-# PV Advanced Toolkit v1.2.0
+# PV Advanced Toolkit v1.3.0
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
@@ -13,6 +13,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 ### Core Modules
 * **Interactive Terminal Emulator:**
     * Execute shell commands directly on the server.
+    * **NEW:** Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.
     * **Intelligent Command Execution:** Automatically finds and uses an available command execution function (`proc_open`, `popen`, `shell_exec`, `system`, `passthru`, `exec`) for maximum compatibility.
     * Command history navigation using Up/Down arrow keys.
     * Maintains the current working directory throughout the session.

