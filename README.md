@@ -1,4 +1,4 @@
-# PV Advanced Toolkit v1.3.0
+# PV Advanced Toolkit v1.4.0
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
@@ -13,13 +13,15 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 ### Core Modules
 * **Interactive Terminal Emulator:**
     * Execute shell commands directly on the server.
-    * **NEW:** Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.
+    * Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.
     * **Intelligent Command Execution:** Automatically finds and uses an available command execution function (`proc_open`, `popen`, `shell_exec`, `system`, `passthru`, `exec`) for maximum compatibility.
     * Command history navigation using Up/Down arrow keys.
     * Maintains the current working directory throughout the session.
     * Renders HTML from server errors (e.g., HTTP 500) directly within the terminal for easier debugging.
 
 * **Advanced File Manager:**
+    * **NEW: Breadcrumb Navigation:** Navigate directories easily with clickable breadcrumb links.
+    * **NEW: Drive Detection:** Automatically detects and displays available system drives (e.g., `C:\`, `D:\`) for quick access on Windows servers.
     * Browse server directories and view detailed file/folder information (name, type, human-readable size, owner/group, octal permissions, last modified date).
     * Remembers the last visited directory across page refreshes.
     * **File Operations:**
@@ -31,7 +33,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
         * Delete files and folders (with recursive deletion for non-empty folders).
     * **Creation Tools:** Create new empty files and folders.
     * **File Uploads:** Upload single or multiple files to the current directory via a simple interface.
-    * **Easy Navigation:** Navigate using an address bar, a "Go" button, and a "Home" button to return to the script's directory.
+    * **Easy Navigation:** Navigate using clickable breadcrumbs and a "Home" button to return to the script's directory.
     * **Visual Icons:** Unique icons for dozens of file types for quick identification.
 
 * **Server Information Panel:**

