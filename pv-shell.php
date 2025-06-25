@@ -232,11 +232,23 @@ function stream_command($command) {
         $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd']);
 
         if (is_resource($process)) {
+            $status = proc_get_status($process);
+            if ($status && isset($status['pid'])) {
+                $_SESSION['running_process_pid'] = $status['pid'];
+            }
+            
+            // --- FIX: Release session lock to allow abort requests to be processed. ---
+            session_write_close();
+
             fclose($pipes[0]);
             stream_set_blocking($pipes[1], false);
             stream_set_blocking($pipes[2], false);
 
             while (true) {
+                // --- REMOVED: The check for $_SESSION['abort_process'] was removed. ---
+                // The abort mechanism now relies on an external kill signal, made
+                // possible by releasing the session lock above.
+                
                 $status = proc_get_status($process);
                 if (!$status['running']) {
                     break;
@@ -258,6 +270,11 @@ function stream_command($command) {
             fclose($pipes[1]);
             fclose($pipes[2]);
             proc_close($process);
+
+            // --- REMOVED: PID is now cleared in the abort action itself. ---
+            // Because the session is closed, this script can no longer modify
+            // the session data to clean up the PID upon normal completion.
+            // The abort action is now responsible for its own cleanup.
             return;
         }
     }
@@ -281,15 +298,64 @@ function stream_command($command) {
     flush();
 }
 
+/**
+ * Reassembles a file from chunks uploaded to a temporary directory.
+ *
+ * @param string $upload_id The unique ID for the upload.
+ * @param string $original_filename The final name of the file.
+ * @param int $total_chunks The total number of chunks.
+ * @param string $target_dir The directory to save the final file in.
+ * @return bool|string True on success, error message string on failure.
+ */
+function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $target_dir) {
+    // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
+    $temp_upload_dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pv-shell-uploads';
+    $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
+    $final_path = rtrim($target_dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $original_filename;
+
+    if (!is_writable($target_dir)) return "Target directory not writable: " . htmlspecialchars($target_dir);
+
+    $out_handle = @fopen($final_path, 'wb');
+    if (!$out_handle) return "Cannot open target file for writing: " . htmlspecialchars($final_path);
+
+    for ($i = 0; $i < $total_chunks; $i++) {
+        // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
+        $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $i;
+        if (!file_exists($chunk_path)) {
+            fclose($out_handle);
+            @unlink($final_path); // Clean up partial file
+            return "Reassembly failed: Missing chunk #" . $i;
+        }
+        $in_handle = @fopen($chunk_path, 'rb');
+        if (!$in_handle) {
+             fclose($out_handle); @unlink($final_path); return "Reassembly failed: Cannot read chunk #" . $i;
+        }
+        stream_copy_to_stream($in_handle, $out_handle);
+        fclose($in_handle);
+        @unlink($chunk_path); // Clean up chunk
+    }
+
+    fclose($out_handle);
+    @rmdir($chunk_dir); // Clean up chunk dir
+    return true;
+}
+
 function command_exists($command) {
+    // Escapeshellarg is used to prevent command injection vulnerabilities.
+    $safe_command = escapeshellarg($command);
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-        $result = @shell_exec("where " . escapeshellarg($command) . " 2> NUL");
+        // 'where' is the command to find executables on Windows.
+        // 2> NUL redirects stderr to null, so we don't get "not found" messages.
+        $result = @shell_exec("where " . $safe_command . " 2> NUL");
         return !empty($result);
     } else {
-        $result = @shell_exec("command -v " . escapeshellarg($command) . " 2>/dev/null");
+        // 'command -v' is the POSIX standard way to check if a command exists.
+        // 2>/dev/null redirects stderr to null.
+        $result = @shell_exec("command -v " . $safe_command . " 2>/dev/null");
         return !empty($result);
     }
 }
+
 
 function network_start_port_bind($port, $password) {
     $output_buffer = "Attempting to bind to port $port...\n";
@@ -817,6 +883,37 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             exit;
             break;
 
+        case 'abort_command':
+            header('Content-Type: application/json');
+            $response = array('status' => 'error');
+            if (isset($_SESSION['running_process_pid']) && $_SESSION['running_process_pid']) {
+                $pid = (int)$_SESSION['running_process_pid'];
+                $command = '';
+                if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                    // --- FIX: Add /T to kill child processes as well for robustness.
+                    $command = "taskkill /F /T /PID " . $pid;
+                } else {
+                    // --- FIX: Use pkill to kill child processes for a more reliable abort.
+                    // This is more robust than a simple 'kill'.
+                    if (command_exists('pkill')) {
+                        // Kill all children of the parent process, then kill the parent.
+                        $command = "pkill -9 -P " . $pid . "; kill -9 " . $pid;
+                    } else {
+                        // Fallback if pkill is not available.
+                        $command = "kill -9 " . $pid;
+                    }
+                }
+                execute_command_with_fallback($command);
+                unset($_SESSION['running_process_pid']);
+                // --- REMOVED: The $_SESSION['abort_process'] flag is no longer used.
+                $response = array('status' => 'success', 'message' => "Abort signal sent to PID {$pid}.");
+            } else {
+                $response['message'] = 'No running process PID found in session to abort. The process may have already finished.';
+            }
+            echo json_encode($response);
+            exit;
+            break;
+
         case 'get_file_listing':
             header('Content-Type: application/json');
             $response = array('status' => 'error', 'message' => 'Invalid AJAX action.');
@@ -1090,55 +1187,54 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $response['message'] = '[Error] No path provided.';
             }
             break;
-
-        case 'upload_file':
-            // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
-            $uploadDir = isset($_POST['upload_target_path']) ? $_POST['upload_target_path'] : $current_ajax_cwd;
-            $realUploadDir = realpath($uploadDir);
+        
+        case 'upload_file_chunk':
+            $upload_target_path = isset($_POST['upload_target_path']) ? $_POST['upload_target_path'] : $current_ajax_cwd;
+            $realUploadDir = realpath($upload_target_path);
 
             if (!$realUploadDir || !is_dir($realUploadDir) || !is_writable($realUploadDir)) {
-                $response['message'] = '[Error] Upload directory is not writable or does not exist: ' . htmlspecialchars($uploadDir);
+                 $response['message'] = '[Error] Upload directory is not writable or does not exist: ' . htmlspecialchars($upload_target_path);
+                 break;
+            }
+            if (empty($_FILES['chunk']['tmp_name']) || !isset($_POST['upload_id']) || !isset($_POST['chunk_index']) || !isset($_POST['total_chunks']) || !isset($_POST['original_filename'])) {
+                $response['message'] = '[Error] Invalid chunk upload request. Missing parameters.';
                 break;
             }
 
-            if (!empty($_FILES['files_to_upload'])) {
-                $uploadedFiles = array(); $errors = array();
-                $files = $_FILES['files_to_upload'];
+            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
+            $temp_upload_dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pv-shell-uploads';
+            if (!is_dir($temp_upload_dir) && !@mkdir($temp_upload_dir, 0755, true)) {
+                $response['message'] = '[Error] Could not create temporary upload directory.';
+                break;
+            }
 
-                if (is_array($files['name'])) {
-                    foreach ($files['name'] as $key => $name) {
-                        if ($files['error'][$key] === UPLOAD_ERR_OK) {
-                            $tmp_name = $files['tmp_name'][$key];
-                            $targetPath = rtrim($realUploadDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . basename($name);
-                            if (@move_uploaded_file($tmp_name, $targetPath)) {
-                                $uploadedFiles[] = htmlspecialchars(basename($name));
-                            } else {
-                                $errors[] = "Failed to move " . htmlspecialchars(basename($name)) . ". Check permissions or disk space.";
-                            }
-                        } elseif ($files['error'][$key] !== UPLOAD_ERR_NO_FILE) {
-                            $errors[] = "Error uploading " . htmlspecialchars(basename($name)) . ". Code: " . $files['error'][$key];
-                        }
+            $upload_id = basename($_POST['upload_id']); // Sanitize
+            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
+            $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
+            if (!is_dir($chunk_dir) && !@mkdir($chunk_dir, 0755, true)) {
+                $response['message'] = '[Error] Could not create temporary chunk directory.';
+                break;
+            }
+            
+            $chunk_index = (int)$_POST['chunk_index'];
+            $total_chunks = (int)$_POST['total_chunks'];
+            $original_filename = basename($_POST['original_filename']); // Sanitize
+
+            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
+            $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $chunk_index;
+            if (@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunk_path)) {
+                if (($chunk_index + 1) == $total_chunks) {
+                    $reassemble_result = reassembleFileChunks($upload_id, $original_filename, $total_chunks, $realUploadDir);
+                    if ($reassemble_result === true) {
+                        $response = array('status' => 'success', 'message' => 'File ' . htmlspecialchars($original_filename) . ' uploaded successfully.');
+                    } else {
+                        $response['message'] = '[Error] ' . $reassemble_result;
                     }
-                } elseif ($files['error'] === UPLOAD_ERR_OK) {
-                     $tmp_name = $files['tmp_name'];
-                     $targetPath = rtrim($realUploadDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . basename($files['name']);
-                     if (@move_uploaded_file($tmp_name, $targetPath)) {
-                         $uploadedFiles[] = htmlspecialchars(basename($files['name']));
-                     } else {
-                         $errors[] = "Failed to move " . htmlspecialchars(basename($files['name'])) . ". Check permissions or disk space.";
-                     }
-                } elseif ($files['error'] !== UPLOAD_ERR_NO_FILE) {
-                     $errors[] = "Error uploading " . htmlspecialchars(basename($files['name'])) . ". Code: " . $files['error'];
-                }
-
-                if (!empty($uploadedFiles)) {
-                    $response['status'] = 'success';
-                    $response['message'] = 'Uploaded: ' . implode(', ', $uploadedFiles) . (empty($errors) ? '' : ' | Errors: ' . implode(', ', $errors));
                 } else {
-                    $response['message'] = empty($errors) ? 'No files were uploaded.' : implode(', ', $errors);
+                    $response = array('status' => 'chunk_ok', 'message' => 'Chunk ' . $chunk_index . ' received.');
                 }
             } else {
-                $response['message'] = '[Error] No files received.';
+                $response['message'] = '[Error] Failed to move uploaded chunk ' . $chunk_index . '.';
             }
             break;
 
@@ -1341,7 +1437,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.4.1</title>
+    <title>Advanced Toolkit v1.5.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1361,7 +1457,8 @@ endif;
         #terminal-output .prompt, #terminal-output .prompt-container { color: #0ff; } #terminal-output .input-command { color: #7ef; }
         #terminal-output .error { color: #f00; } #terminal-output .info { color: #0cc; }
         #terminal-output .html-error-container iframe { width: 100%; height: 350px; border: 1px dashed #f00; background: #fff; }
-        #command-input { width: calc(100% - 22px); background: #111; border: 1px solid #0ff; color: #0ff; padding: 10px; font-family: 'Consolas', 'Monaco', monospace; border-radius: 5px; }
+        #command-input-wrapper { display: flex; gap: 5px; }
+        #command-input { flex-grow: 1; background: #111; border: 1px solid #0ff; color: #0ff; padding: 10px; font-family: 'Consolas', 'Monaco', monospace; border-radius: 5px; }
         #file-manager-path-container { margin-bottom: 10px; }
         #drive-list { margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px; }
         #file-manager-path { display: flex; align-items: center; flex-wrap: wrap; background: #000; padding: 8px; border-radius: 4px; border: 1px solid #055; min-height: 20px;}
@@ -1370,15 +1467,9 @@ endif;
         #file-manager-path span.separator { color: #077; }
         .inputzbut { background: #0ff; border: none; color: #000; font-weight: bold; padding: 10px 15px; cursor: pointer; border-radius: 4px; transition: all 0.3s ease; font-family: 'Orbitron', sans-serif;}
         .inputzbut:hover { background: #0aa; box-shadow: 0 0 10px #0aa; }
+        .inputzbut:disabled { background: #555; cursor: not-allowed; }
         .file-table { width: 100%; border-collapse: collapse; margin-top:10px; table-layout: auto; }
-        .file-table th, .file-table td {
-            border: 1px solid #055;
-            padding: 8px;
-            text-align: left;
-            font-size: 0.9em;
-            word-break: break-all;
-            vertical-align: middle;
-        }
+        .file-table th, .file-table td { border: 1px solid #055; padding: 8px; text-align: left; font-size: 0.9em; word-break: break-all; vertical-align: middle; }
         .file-table th { background: #033; color: #0ff; }
         .file-table tr:nth-child(even) { background: #010101; }
         .file-table tbody tr:hover { background-color: #025 !important; }
@@ -1415,23 +1506,31 @@ endif;
         .hidden { display: none !important; }
         .button-bar { margin-top: 10px; margin-bottom: 10px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;}
         #upload-status { margin-left: 0; color: #0cc; }
-        #file-view-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; opacity:0; visibility: hidden; transition: opacity 0.3s ease, visibility 0.3s ease; }
-        #file-view-modal.visible { opacity:1; visibility: visible;}
-        #file-view-modal > div { background: #111; padding: 20px; border: 2px solid #0ff; border-radius: 10px; width: 80%; max-width: 900px; box-shadow: 0 0 30px #0ff; transform: scale(0.9); transition: transform 0.3s ease;}
-        #file-view-modal.visible > div { transform: scale(1); }
-        #file-modal-title { margin-top:0; color: #0ff; }
+        #file-view-modal, #upload-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; opacity:0; visibility: hidden; transition: opacity 0.3s ease, visibility 0.3s ease; }
+        #file-view-modal.visible, #upload-modal.visible { opacity:1; visibility: visible;}
+        #file-view-modal > div, #upload-modal > div { background: #111; padding: 20px; border: 2px solid #0ff; border-radius: 10px; width: 80%; max-width: 900px; box-shadow: 0 0 30px #0ff; transform: scale(0.9); transition: transform 0.3s ease;}
+        #file-view-modal.visible > div, #upload-modal.visible > div { transform: scale(1); }
+        #file-modal-title, #upload-modal-title { margin-top:0; color: #0ff; }
         #file-content-area { width: calc(100% - 12px); height: 50vh; background: #000; color: #0f0; border: 1px solid #055; font-family: 'Consolas', 'Monaco', monospace; padding:5px; font-size:0.9em; border-radius: 3px; resize: vertical;}
-        #file-view-modal .button-bar button { font-family: 'Orbitron', sans-serif; }
+        #file-view-modal .button-bar button, #upload-modal .button-bar button { font-family: 'Orbitron', sans-serif; }
         .modal-message { padding: 10px; margin-bottom: 15px; border-radius: 5px; text-align: center; font-weight:bold; }
         .modal-message.success { background-color: #050; color: #0f0; border: 1px solid #0a0;}
         .modal-message.error { background-color: #500; color: #f00; border: 1px solid #a00;}
         select.inputz { width: auto; min-width: 218px;}
+        /* --- NEW: Upload Progress Bar Styles --- */
+        #upload-progress-container { width: 100%; max-height: 400px; overflow-y: auto; padding-right: 10px; }
+        .upload-progress-item { margin-bottom: 15px; }
+        .upload-progress-item .filename { word-break: break-all; font-size: 0.9em; margin-bottom: 5px; }
+        .upload-progress-bar-bg { background-color: #222; border: 1px solid #0ff; border-radius: 5px; padding: 2px; }
+        .upload-progress-bar { background-color: #0ff; height: 15px; border-radius: 3px; width: 0%; transition: width 0.2s ease-out; }
+        .upload-progress-info { font-size: 0.8em; margin-top: 3px; display: flex; justify-content: space-between; }
+        .upload-progress-info .status { color: #0cc; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.4.1</h1>
+            <h1>💀 PV Advanced Toolkit v1.5.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1448,7 +1547,11 @@ endif;
 
         <div id="terminal" class="tab-content active">
             <div id="terminal-output"></div>
-            <input type="text" id="command-input" placeholder="Enter command..." autocomplete="off">
+            <!-- === NEW: Wrapper for input and abort button === -->
+            <div id="command-input-wrapper">
+                <input type="text" id="command-input" placeholder="Enter command..." autocomplete="off">
+                <button id="terminal-abort-btn" class="inputzbut hidden" style="background-color: #ff4444;" title="Terminate running command (SIGKILL)">Abort</button>
+            </div>
         </div>
 
         <div id="filemanager" class="tab-content">
@@ -1469,7 +1572,6 @@ endif;
                  <button id="file-upload-btn" class="inputzbut">Upload File(s)</button>
                  <button id="create-file-btn" class="inputzbut">New File</button>
                  <button id="create-folder-btn" class="inputzbut">New Folder</button>
-                 <span id="upload-status"></span>
             </div>
             <table class="file-table">
                 <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Owner/Group</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead>
@@ -1482,6 +1584,16 @@ endif;
                     <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
                         <button id="save-file-btn" class="inputzbut">Save Changes</button>
                         <button id="close-modal-btn" class="inputzbut" style="background:#555;">Close</button>
+                    </div>
+                </div>
+            </div>
+            <!-- === NEW: Upload Modal === -->
+            <div id="upload-modal">
+                <div>
+                    <h3 id="upload-modal-title">File Upload Progress</h3>
+                    <div id="upload-progress-container"></div>
+                    <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
+                        <button id="close-upload-modal-btn" class="inputzbut" style="background:#555;">Close</button>
                     </div>
                 </div>
             </div>
@@ -1550,7 +1662,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.4.1</p>
+                        <p><strong>Version:</strong> 1.5.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1562,50 +1674,34 @@ endif;
                     <li><strong>Interactive Terminal Emulator:</strong>
                         <ul>
                             <li>Execute shell commands directly on the server.</li>
-                            <li>Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.</li>
+                            <li><strong>NEW: Abort Command:</strong> Terminate long-running commands with an 'Abort' button.</li>
+                            <li>Support for long-running commands via real-time output streaming, preventing AJAX timeouts.</li>
                             <li>Command history navigation with Up/Down arrow keys.</li>
                             <li>Maintains current working directory per session.</li>
-                            <li>Renders HTML from server errors (e.g. 500) directly in the terminal view.</li>
                         </ul>
                     </li>
                     <li><strong>Advanced File Manager:</strong>
                         <ul>
-                            <li><strong>NEW: Breadcrumb & Path Bar Navigation:</strong> Navigate directories easily with clickable breadcrumb links or by typing directly into an editable path bar.</li>
-                            <li><strong>NEW: Drive Detection:</strong> Automatically detects and displays available system drives (e.g., C:\, D:\) for quick access on Windows servers.</li>
-                            <li>Browse server directories and view file/folder details (name, type, human-readable size, permissions, last modified date).</li>
-                            <li>Remembers the last visited directory across page refreshes.</li>
-                            <li><strong>File Operations:</strong> View/Edit text files, Download files, Rename files/folders, Change permissions (chmod), Update timestamps (touch), Delete files and folders (recursively for non-empty folders).</li>
+                            <li><strong>NEW: Large File Uploads & Progress Bar:</strong> Upload files of any size (1GB+) with real-time progress bars for each file, using a chunked upload method.</li>
+                            <li><strong>Navigation:</strong> Navigate directories with clickable breadcrumbs, an editable path bar, and drive detection (Windows).</li>
+                            <li>Browse server directories and view file/folder details (name, type, size, permissions, last modified).</li>
+                            <li><strong>File Operations:</strong> View/Edit text files, Download files, Rename, Chmod, Touch, and Delete files/folders (recursively).</li>
                             <li><strong>Creation Tools:</strong> Create new empty files and new folders.</li>
-                            <li><strong>File Uploads:</strong> Upload single or multiple files to the current directory.</li>
-                            <li>Easy navigation via breadcrumbs and a "Home" button.</li>
                             <li>Visual icons for different file types.</li>
                         </ul>
                     </li>
                     <li><strong>Server Information Panel:</strong>
                         <ul>
-                            <li>Displays a wide range of server details including software, PHP version, OS, CPU info, user info, PHP configurations (safe mode, disabled functions, memory limits, etc.), enabled extensions (cURL, mailer, databases), disk space, network details, and more.</li>
+                            <li>Displays a wide range of server details including software, PHP version, OS, CPU info, user info, PHP configurations (safe mode, disabled functions, memory limits, etc.), enabled extensions, disk space, network details, and more.</li>
                         </ul>
                     </li>
                     <li><strong>Network Tools:</strong>
                         <ul>
-                            <li><strong>PHP Foreground Port Bind Shell:</strong> Listens on a specified port for incoming connections, providing an interactive shell upon successful password authentication. (Page will hang while active)</li>
-                            <li><strong>PHP Foreground Back Connect Shell:</strong> Connects back to a specified IP and port, providing an interactive shell. (Page will hang while active)</li>
-                            <li><strong>Ping Utility:</strong> Sends ICMP echo requests to a specified host.</li>
-                            <li><strong>DNS Lookup Utility:</strong> Retrieves DNS records for a specified host.</li>
-                             <li><strong>Port Scanner:</strong> Checks for open TCP ports on a target host.</li>
+                            <li><strong>PHP Foreground Shells:</strong> Port Bind and Back Connect interactive shells.</li>
+                            <li><strong>Utilities:</strong> Ping, DNS Lookup, and a Port Scanner.</li>
                         </ul>
                     </li>
-                    <li><strong>PHP Info Display:</strong> Shows the full output of `phpinfo()` in an isolated iframe for detailed PHP environment inspection.</li>
-                    <li><strong>User-Friendly Interface:</strong>
-                        <ul>
-                            <li>Clean, tabbed layout for easy navigation between modules.</li>
-                            <li>Styled with a "hacker console" theme.</li>
-                            <li>Responsive elements for better usability on different screen sizes.</li>
-                            <li>Modal pop-ups for file viewing/editing and user prompts.</li>
-                            <li>Custom, non-blocking alert messages for operation feedback.</li>
-                        </ul>
-                    </li>
-                     <li><strong>Error Handling & Logging:</strong> Basic error logging to `pv-error_log` for troubleshooting.</li>
+                    <li><strong>PHP Info Display:</strong> Shows the full output of `phpinfo()` in an isolated iframe.</li>
                 </ul>
                 <p><em>Disclaimer: This tool provides powerful server access. Use responsibly and ensure it is adequately secured. The developer is not responsible for any misuse.</em></p>
             </div>
@@ -1614,10 +1710,12 @@ endif;
     </div>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    // --- Element Selectors ---
     const tabs = document.querySelectorAll('.tab-link');
     const contents = document.querySelectorAll('.tab-content');
     const terminalOutput = document.getElementById('terminal-output');
     const commandInput = document.getElementById('command-input');
+    const terminalAbortBtn = document.getElementById('terminal-abort-btn');
     const fileListingBody = document.getElementById('file-listing');
     const driveListContainer = document.getElementById('drive-list');
     const breadcrumbContainer = document.getElementById('file-manager-path');
@@ -1630,6 +1728,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const saveFileBtn = document.getElementById('save-file-btn');
     const closeModalBtn = document.getElementById('close-modal-btn');
     const fileModalMessage = document.getElementById('file-modal-message');
+    const fileUploadInput = document.getElementById('file-upload-input');
+    const fileUploadBtn = document.getElementById('file-upload-btn');
+    const uploadModal = document.getElementById('upload-modal');
+    const uploadProgressContainer = document.getElementById('upload-progress-container');
+    const closeUploadModalBtn = document.getElementById('close-upload-modal-btn');
+    
+    // --- State Variables ---
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
     const terminalCwdFromServer = '<?php echo addslashes(htmlspecialchars(isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd())); ?>';
@@ -1638,11 +1743,23 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentEditingFile = '';
     let commandHistory = [];
     let historyIndex = -1;
-
+    let isCommandRunning = false;
+    
+    // --- Utility Functions ---
     function htmlEntities(str) {
         return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
+    
+    function formatBytes(bytes, decimals = 2) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
 
+    // --- Modal Management ---
     function showModalMessage(message, type = 'success') {
         fileModalMessage.textContent = message;
         fileModalMessage.className = `modal-message ${type}`;
@@ -1653,490 +1770,7 @@ document.addEventListener('DOMContentLoaded', function() {
         fileModalMessage.classList.add('hidden');
     }
 
-    window.openModalWithFile = function(filePath, fileName) {
-        currentEditingFile = filePath;
-        fileModalTitle.textContent = `View/Edit: ${htmlEntities(fileName)}`;
-        fileContentArea.value = 'Loading content...';
-        hideModalMessage();
-        fileViewModal.classList.add('visible');
-
-        sendAjaxRequest('get_file_content', { path: filePath })
-            .then(result => {
-                if (result.status === 'success' && typeof result.content !== 'undefined') {
-                    fileContentArea.value = result.content;
-                } else {
-                    const errorMsg = result.message || 'Failed to load file content.';
-                    fileContentArea.value = `Error: ${errorMsg}`;
-                    showModalMessage(errorMsg, 'error');
-                }
-            })
-            .catch(error => {
-                const errorMsg = `AJAX Error: ${error.message || 'Unknown error'}`;
-                fileContentArea.value = `Error: ${errorMsg}`;
-                showModalMessage(errorMsg, 'error');
-             });
-    }
-
-    closeModalBtn.addEventListener('click', () => {
-        fileViewModal.classList.remove('visible');
-        currentEditingFile = '';
-        fileContentArea.value = '';
-    });
-
-    function setActiveTab(tabId) {
-        tabs.forEach(t => t.classList.remove('active'));
-        contents.forEach(c => c.classList.remove('active'));
-
-        const activeTabLink = document.querySelector(`.tab-link[data-tab="${tabId}"]`);
-        const activeTabContent = document.getElementById(tabId);
-
-        if (activeTabLink && activeTabContent) {
-            activeTabLink.classList.add('active');
-            activeTabContent.classList.add('active');
-            localStorage.setItem('activeShellTab', tabId);
-
-            if (tabId === 'phpinfo' && (!phpInfoIframe.src || phpInfoIframe.src === "about:blank")) {
-                 phpInfoIframe.src = '?action_get=phpinfo_content';
-            }
-             if (tabId === 'filemanager' && fileListingBody.innerHTML.includes('Loading...')) {
-                fetchFiles(currentFileManagerPath);
-            }
-        } else {
-            document.querySelector('.tab-link[data-tab="terminal"]').classList.add('active');
-            document.getElementById('terminal').classList.add('active');
-            localStorage.setItem('activeShellTab', 'terminal');
-        }
-    }
-
-    tabs.forEach(tab => {
-        tab.addEventListener('click', function() {
-            const tabId = this.dataset.tab;
-            setActiveTab(tabId);
-        });
-    });
-
-    const lastTabId = localStorage.getItem('activeShellTab');
-    setActiveTab(lastTabId || 'terminal');
-
-
-    async function sendAjaxRequest(action, data = {}, isUpload = false) {
-        const formData = isUpload ? data : new FormData();
-
-        if (!isUpload) {
-            formData.append('ajax_action', action);
-            for (const key in data) {
-                formData.append(key, data[key]);
-            }
-        } else {
-             formData.append('ajax_action', action);
-             if (action === 'upload_file' && data instanceof FormData && !data.has('upload_target_path')) {
-                 formData.append('upload_target_path', currentFileManagerPath);
-             }
-        }
-
-        try {
-            const response = await fetch('<?php echo $_SERVER['PHP_SELF']; ?>', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                const contentType = response.headers.get("content-type");
-
-                if (contentType && contentType.indexOf("text/html") !== -1) {
-                    return { status: 'html_error', content: errorText, cwd: currentTerminalCwd };
-                }
-
-                console.error(`HTTP error! status: ${response.status}`, errorText);
-                 try {
-                    const jsonError = JSON.parse(errorText);
-                    return { status: 'error', message: jsonError.message || errorText, http_status: response.status, cwd: currentTerminalCwd };
-                } catch (e) {
-                    return { status: 'error', message: errorText, http_status: response.status, cwd: currentTerminalCwd };
-                }
-            }
-
-            const responseData = await response.json();
-
-            if (responseData.cwd) {
-                currentTerminalCwd = responseData.cwd;
-            }
-            if (responseData.path) {
-                currentFileManagerPath = responseData.path;
-            }
-            return responseData;
-        } catch (error) {
-            console.error('AJAX Error:', error);
-            return { status: 'error', message: `AJAX request failed: ${error.message}`, cwd: currentTerminalCwd };
-        }
-    }
-
-    function appendToTerminalOutput(text, type = 'output') {
-        const line = document.createElement('div');
-        if (type === 'input-command') {
-            line.innerHTML = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span><span class="input-command">${htmlEntities(text)}</span>`;
-        } else if (type === 'error') {
-            line.className = 'error';
-            line.textContent = text;
-        } else if (type === 'info') {
-            line.className = 'info';
-            line.textContent = text;
-        } else if (type === 'html_error') {
-            line.className = 'html-error-container';
-            const iframe = document.createElement('iframe');
-            iframe.sandbox = 'allow-same-origin';
-            iframe.srcdoc = text;
-            line.appendChild(iframe);
-        } else if (type === 'prompt') {
-            const newPromptHtml = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span>`;
-            if (terminalOutput.lastChild && terminalOutput.lastChild.classList.contains('prompt-container')) {
-                 terminalOutput.lastChild.innerHTML = newPromptHtml;
-            } else {
-                 line.className = 'prompt-container';
-                 line.innerHTML = newPromptHtml;
-                 terminalOutput.appendChild(line);
-            }
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-            return;
-        }
-        else {
-            line.innerHTML = text;
-        }
-        terminalOutput.appendChild(line);
-        terminalOutput.scrollTop = terminalOutput.scrollHeight;
-    }
-
-    async function streamCommand(command) {
-        const outputContainer = document.createElement('div');
-        terminalOutput.appendChild(outputContainer);
-
-        try {
-            const formData = new FormData();
-            formData.append('ajax_action', 'execute_command');
-            formData.append('command', command);
-
-            const response = await fetch('<?php echo $_SERVER['PHP_SELF']; ?>', {
-                method: 'POST',
-                body: formData
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP error ${response.status}: ${errorText}`);
-            }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-                const chunk = decoder.decode(value, { stream: true });
-                outputContainer.textContent += chunk;
-                terminalOutput.scrollTop = terminalOutput.scrollHeight;
-            }
-
-        } catch (error) {
-            outputContainer.className = 'error';
-            outputContainer.textContent = `[Stream Error] ${error.message}`;
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-        }
-    }
-
-
-    commandInput.addEventListener('keypress', async function(e) {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            const commandText = this.value.trim();
-            this.value = '';
-
-            if (commandText === '') {
-                appendToTerminalOutput("", 'prompt');
-                return;
-            }
-
-            commandHistory.unshift(commandText);
-            if (commandHistory.length > 50) commandHistory.pop();
-            historyIndex = -1;
-
-            appendToTerminalOutput(commandText, 'input-command');
-
-            if (commandText.toLowerCase() === 'clear') {
-                terminalOutput.innerHTML = '';
-                appendToTerminalOutput('Terminal cleared.', 'info');
-            } else if (commandText.trim().toLowerCase().startsWith('cd')) {
-                const result = await sendAjaxRequest('execute_command', { command: commandText });
-                if (result.status === 'success' && result.output) {
-                    appendToTerminalOutput(result.output);
-                } else if (result.status !== 'success') {
-                    appendToTerminalOutput(result.message || 'Error executing command.', 'error');
-                }
-            } else {
-                await streamCommand(commandText);
-            }
-
-            appendToTerminalOutput("", 'prompt');
-        }
-    });
-
-
-    commandInput.addEventListener('keydown', function(e) {
-        if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            if (commandHistory.length > 0 && historyIndex < commandHistory.length - 1) {
-                historyIndex++;
-                this.value = commandHistory[historyIndex];
-            }
-        } else if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            if (historyIndex > 0) {
-                historyIndex--;
-                this.value = commandHistory[historyIndex];
-            } else {
-                historyIndex = -1;
-                this.value = '';
-            }
-        }
-    });
-
-    if (document.getElementById('terminal').classList.contains('active')) {
-        appendToTerminalOutput("", 'prompt');
-    }
-
-    async function fetchFiles(path) {
-        fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
-
-        const result = await sendAjaxRequest('get_file_listing', { path: path });
-
-        // Always clear and re-render navigation elements, even on error
-        driveListContainer.innerHTML = '';
-        breadcrumbContainer.innerHTML = '';
-
-        if (result.path) {
-            pathInput.value = result.path;
-        }
-
-        // Render drives if available (for Windows)
-        if (result.drives && result.drives.length > 0) {
-            result.drives.forEach(drive => {
-                const driveBtn = document.createElement('button');
-                driveBtn.className = 'inputzbut';
-                driveBtn.textContent = drive + '\\';
-                driveBtn.style.padding = '5px 10px';
-                driveBtn.style.fontSize = '0.9em';
-                driveBtn.addEventListener('click', () => fetchFiles(drive + '\\'));
-                driveListContainer.appendChild(driveBtn);
-            });
-        }
-
-        // Render breadcrumbs if available
-        if (result.breadcrumbs && result.breadcrumbs.length > 0) {
-            const separator = result.ds === '\\' ? '\\' : '/';
-            result.breadcrumbs.forEach((crumb, index) => {
-                const crumbLink = document.createElement('a');
-                crumbLink.href = '#';
-                crumbLink.textContent = htmlEntities(crumb.name);
-                crumbLink.addEventListener('click', (e) => { e.preventDefault(); fetchFiles(crumb.path); });
-                breadcrumbContainer.appendChild(crumbLink);
-
-                if (index < result.breadcrumbs.length - 1) {
-                    const sepSpan = document.createElement('span');
-                    sepSpan.className = 'separator';
-                    // On linux, don't add separator right after the root '/'
-                    if (!(separator === '/' && index === 0)) {
-                         sepSpan.textContent = " " + separator + " ";
-                        breadcrumbContainer.appendChild(sepSpan);
-                    }
-                }
-            });
-        }
-
-        // Handle the file listing based on request status
-        fileListingBody.innerHTML = '';
-        if (result.status === 'success') {
-            if (!result.files || result.files.length === 0) {
-                fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Directory is empty.</td></tr>`;
-                return;
-            }
-
-            result.files.forEach(file => {
-                const row = fileListingBody.insertRow();
-                const fullItemPath = file.full_path;
-                const escapedFullPath = htmlEntities(fullItemPath);
-                const escapedFileName = htmlEntities(file.name);
-
-                let nameCellContent = `<i class="${file.icon_class}" style="color:${file.icon_color};"></i>`;
-                const linkAttributes = `href="#" data-path="${escapedFullPath}" data-name="${escapedFileName}"`;
-                if (file.type === 'dir') {
-                    nameCellContent += `<a ${linkAttributes} class="dir-link" style="color:${file.icon_color};">${escapedFileName}</a>`;
-                } else {
-                    nameCellContent += `<a ${linkAttributes} class="file-link" style="color:${file.icon_color};">${escapedFileName}</a>`;
-                }
-                row.insertCell().innerHTML = nameCellContent;
-
-                row.insertCell().textContent = file.type;
-                row.insertCell().textContent = file.size;
-                row.insertCell().textContent = file.owner;
-                row.insertCell().innerHTML = `<span style="color:${file.perm_color}; font-weight:bold;">${file.perms}</span>`;
-                row.insertCell().textContent = file.modified;
-                const actionsCell = row.insertCell();
-
-                if (file.name !== '..') {
-                    if (file.type === 'file') {
-                        const viewBtn = document.createElement('button');
-                        viewBtn.title = "View/Edit"; viewBtn.className = 'action-btn';
-                        viewBtn.innerHTML = '<i class="fas fa-edit"></i>';
-                        viewBtn.addEventListener('click', () => openModalWithFile(fullItemPath, file.name));
-                        actionsCell.appendChild(viewBtn);
-
-                        const downLink = document.createElement('a');
-                        downLink.title = "Download"; downLink.className = 'action-btn';
-                        downLink.href = `?action_get=download_file&path=${encodeURIComponent(fullItemPath)}`;
-                        downLink.innerHTML = '<i class="fas fa-download"></i>';
-                        actionsCell.appendChild(downLink);
-                    }
-                    const renameBtn = document.createElement('button');
-                    renameBtn.title = "Rename"; renameBtn.className = 'action-btn';
-                    renameBtn.innerHTML = '<i class="fas fa-pencil-alt"></i>';
-                    renameBtn.addEventListener('click', () => renameItem(fullItemPath, file.name));
-                    actionsCell.appendChild(renameBtn);
-
-                    const chmodBtn = document.createElement('button');
-                    chmodBtn.title = "Chmod"; chmodBtn.className = 'action-btn';
-                    chmodBtn.innerHTML = '<i class="fas fa-shield-halved"></i>';
-                    chmodBtn.addEventListener('click', () => chmodItem(fullItemPath, file.perms, file.name));
-                    actionsCell.appendChild(chmodBtn);
-
-                    const touchBtn = document.createElement('button');
-                    touchBtn.title = "Touch"; touchBtn.className = 'action-btn';
-                    touchBtn.innerHTML = '<i class="fas fa-hand-pointer"></i>';
-                    touchBtn.addEventListener('click', () => touchItem(fullItemPath, file.name));
-                    actionsCell.appendChild(touchBtn);
-
-                    const deleteBtn = document.createElement('button');
-                    deleteBtn.title = "Delete"; deleteBtn.className = 'action-btn';
-                    deleteBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
-                    deleteBtn.addEventListener('click', () => deleteItem(fullItemPath, file.name, file.type));
-                    actionsCell.appendChild(deleteBtn);
-                }
-            });
-
-            document.querySelectorAll('.dir-link').forEach(link => {
-                link.addEventListener('click', function(e) { e.preventDefault(); fetchFiles(this.dataset.path); });
-            });
-            document.querySelectorAll('.file-link').forEach(link => {
-                link.addEventListener('click', function(e) { e.preventDefault(); openModalWithFile(this.dataset.path, this.dataset.name); });
-            });
-        } else {
-            fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:red;">${htmlEntities(result.message)}</td></tr>`;
-        }
-    }
-
-    // === NEW: Event listeners for Path Bar Navigation ===
-    function navigateToInputPath() {
-        const newPath = pathInput.value.trim();
-        if (newPath) {
-            fetchFiles(newPath);
-        }
-    }
-    goBtn.addEventListener('click', navigateToInputPath);
-    pathInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            navigateToInputPath();
-        }
-    });
-
-    document.getElementById('file-manager-home-btn').addEventListener('click', () => fetchFiles(scriptHomeDirectory));
-
-
-    const fileUploadInput = document.getElementById('file-upload-input');
-    const fileUploadBtn = document.getElementById('file-upload-btn');
-    const uploadStatus = document.getElementById('upload-status');
-
-    fileUploadBtn.addEventListener('click', () => fileUploadInput.click());
-    fileUploadInput.addEventListener('change', async function() {
-        if (this.files.length === 0) {
-            uploadStatus.textContent = 'No files selected.';
-            return;
-        }
-        uploadStatus.textContent = 'Uploading...';
-        const formData = new FormData();
-        for (let i = 0; i < this.files.length; i++) {
-            formData.append('files_to_upload[]', this.files[i]);
-        }
-        const result = await sendAjaxRequest('upload_file', formData, true);
-        showCustomAlert(result.message || (result.status === 'success' ? 'Upload complete!' : 'Upload failed!'), result.status);
-        if (result.status === 'success') {
-            fetchFiles(currentFileManagerPath);
-        }
-        this.value = '';
-    });
-
-    saveFileBtn.addEventListener('click', async () => {
-        if (!currentEditingFile) {
-            showModalMessage('No file is currently being edited.', 'error');
-            return;
-        }
-        showModalMessage('Saving...', 'info');
-        const result = await sendAjaxRequest('save_file_content', {
-            path: currentEditingFile,
-            content: fileContentArea.value
-        });
-        showModalMessage(result.message || (result.status === 'success' ? 'File saved!' : 'Failed to save!'), result.status);
-         if (result.status === 'success') {
-         }
-    });
-
-    window.renameItem = async function(itemPath, currentName) {
-        const newName = prompt(`Enter new name for "${currentName}":`, currentName);
-        if (newName && newName.trim() !== "" && newName !== currentName) {
-            const result = await sendAjaxRequest('rename_item', { path: itemPath, new_name: newName.trim() });
-            showCustomAlert(result.message || (result.status === 'success' ? 'Renamed!' : 'Failed!'), result.status);
-            if (result.status === 'success') fetchFiles(currentFileManagerPath);
-        }
-    }
-
-    window.chmodItem = async function(itemPath, currentPerms, itemName) {
-        const newPerms = prompt(`Enter new permissions for "${itemName}" (e.g., 0755 or 755):`, currentPerms.slice(-3));
-        if (newPerms && newPerms.match(/^[0-7]{3,4}$/)) {
-            const result = await sendAjaxRequest('chmod_item', { path: itemPath, perms: newPerms.trim() });
-            showCustomAlert(result.message || (result.status === 'success' ? 'Chmod OK!' : 'Failed!'), result.status);
-            if (result.status === 'success') fetchFiles(currentFileManagerPath);
-        } else if (newPerms) {
-            showCustomAlert("Invalid permission format. Use octal (e.g., 0755).", 'error');
-        }
-    }
-
-     window.touchItem = async function(itemPath, itemName) {
-        const currentDate = new Date();
-        const year = currentDate.getFullYear();
-        const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-        const day = String(currentDate.getDate()).padStart(2, '0');
-        const hours = String(currentDate.getHours()).padStart(2, '0');
-        const minutes = String(currentDate.getMinutes()).padStart(2, '0');
-        const seconds = String(currentDate.getSeconds()).padStart(2, '0');
-        const currentTimestamp = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-
-        const newTimeStr = prompt(`Enter new timestamp (YYYY-MM-DD HH:MM:SS) for "${itemName}":`, currentTimestamp);
-        if (newTimeStr) {
-            const result = await sendAjaxRequest('touch_item', { path: itemPath, datetime_str: newTimeStr });
-            showCustomAlert(result.message || (result.status === 'success' ? 'Timestamp updated!' : 'Failed to update timestamp!'), result.status);
-            if (result.status === 'success') fetchFiles(currentFileManagerPath);
-        }
-    }
-
-    window.deleteItem = async function(itemPath, itemName, itemType) {
-        if (confirm(`Are you sure you want to delete ${itemType} "${itemName}"? This cannot be undone.`)) {
-            const result = await sendAjaxRequest('delete_item', { path: itemPath });
-            showCustomAlert(result.message || (result.status === 'success' ? 'Deleted!' : 'Failed!'), result.status);
-            if (result.status === 'success') fetchFiles(currentFileManagerPath);
-        }
-    };
-
+    // --- Custom Alert ---
     function showCustomAlert(message, type = 'info', duration = 3000) {
         const alertBox = document.createElement('div');
         Object.assign(alertBox.style, {
@@ -2156,81 +1790,511 @@ document.addEventListener('DOMContentLoaded', function() {
         }, duration);
     }
 
+    // --- Tab Management ---
+    function setActiveTab(tabId) {
+        tabs.forEach(t => t.classList.remove('active'));
+        contents.forEach(c => c.classList.remove('active'));
+        const activeTabLink = document.querySelector(`.tab-link[data-tab="${tabId}"]`);
+        const activeTabContent = document.getElementById(tabId);
+
+        if (activeTabLink && activeTabContent) {
+            activeTabLink.classList.add('active');
+            activeTabContent.classList.add('active');
+            localStorage.setItem('activeShellTab', tabId);
+            if (tabId === 'phpinfo' && (!phpInfoIframe.src || phpInfoIframe.src === "about:blank")) {
+                phpInfoIframe.src = '?action_get=phpinfo_content';
+            }
+            if (tabId === 'filemanager' && fileListingBody.innerHTML.includes('Loading...')) {
+                fetchFiles(currentFileManagerPath);
+            }
+        } else {
+            setActiveTab('terminal'); // Default to terminal if invalid tabId
+        }
+    }
+    tabs.forEach(tab => tab.addEventListener('click', function() { setActiveTab(this.dataset.tab); }));
+    const lastTabId = localStorage.getItem('activeShellTab');
+    setActiveTab(lastTabId || 'terminal');
+
+
+    // --- Core AJAX Function ---
+    async function sendAjaxRequest(action, data = {}, isUpload = false) {
+        const formData = isUpload ? data : new FormData();
+        if (!isUpload) {
+            formData.append('ajax_action', action);
+            for (const key in data) {
+                formData.append(key, data[key]);
+            }
+        }
+        try {
+            const response = await fetch('<?php echo $_SERVER['PHP_SELF']; ?>', { method: 'POST', body: formData });
+            if (!response.ok) {
+                const errorText = await response.text();
+                if (response.headers.get("content-type")?.indexOf("text/html") !== -1) {
+                    return { status: 'html_error', content: errorText };
+                }
+                throw new Error(errorText || `HTTP error ${response.status}`);
+            }
+            const responseData = await response.json();
+            if (responseData.cwd) currentTerminalCwd = responseData.cwd;
+            if (responseData.path) currentFileManagerPath = responseData.path;
+            return responseData;
+        } catch (error) {
+            console.error('AJAX Error:', error);
+            return { status: 'error', message: `AJAX request failed: ${error.message}` };
+        }
+    }
+
+    // --- Terminal Logic ---
+    function setCommandRunning(running) {
+        isCommandRunning = running;
+        commandInput.disabled = running;
+        if(running) {
+            terminalAbortBtn.classList.remove('hidden');
+        } else {
+            terminalAbortBtn.classList.add('hidden');
+            appendToTerminalOutput("", 'prompt');
+        }
+    }
+
+    function appendToTerminalOutput(text, type = 'output') {
+        const line = document.createElement('div');
+        if (type === 'input-command') {
+            line.innerHTML = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span><span class="input-command">${htmlEntities(text)}</span>`;
+        } else if (type === 'error') {
+            line.className = 'error'; line.textContent = text;
+        } else if (type === 'info') {
+            line.className = 'info'; line.textContent = text;
+        } else if (type === 'html_error') {
+            line.className = 'html-error-container';
+            const iframe = document.createElement('iframe');
+            iframe.sandbox = 'allow-same-origin'; iframe.srcdoc = text;
+            line.appendChild(iframe);
+        } else if (type === 'prompt') {
+            const promptHtml = `<span class="prompt">${htmlEntities(currentTerminalCwd)}&gt; </span>`;
+            if (terminalOutput.lastChild && terminalOutput.lastChild.classList.contains('prompt-container')) {
+                 terminalOutput.lastChild.innerHTML = promptHtml;
+            } else {
+                 line.className = 'prompt-container'; line.innerHTML = promptHtml;
+                 terminalOutput.appendChild(line);
+            }
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            return;
+        } else {
+            line.innerHTML = text;
+        }
+        terminalOutput.appendChild(line);
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    }
+
+    async function handleCommand(commandText) {
+        appendToTerminalOutput(commandText, 'input-command');
+        setCommandRunning(true);
+        
+        if (commandText.toLowerCase() === 'clear') {
+            terminalOutput.innerHTML = '';
+            appendToTerminalOutput('Terminal cleared.', 'info');
+            setCommandRunning(false);
+        } else if (commandText.trim().toLowerCase().startsWith('cd')) {
+            const result = await sendAjaxRequest('execute_command', { command: commandText });
+            if (result.status === 'success' && result.output) {
+                appendToTerminalOutput(result.output, 'info');
+            } else if (result.status !== 'success') {
+                appendToTerminalOutput(result.message || 'Error executing cd.', 'error');
+            }
+            setCommandRunning(false);
+        } else {
+            await streamCommand(commandText);
+            setCommandRunning(false);
+        }
+    }
+
+    async function streamCommand(command) {
+        const outputContainer = document.createElement('div');
+        terminalOutput.appendChild(outputContainer);
+        try {
+            const formData = new FormData();
+            formData.append('ajax_action', 'execute_command'); formData.append('command', command);
+            const response = await fetch('<?php echo $_SERVER['PHP_SELF']; ?>', { method: 'POST', body: formData });
+            if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                if (isCommandRunning === false) { // Check if abort was clicked
+                    reader.cancel();
+                    break;
+                }
+                const { done, value } = await reader.read();
+                if (done) break;
+                outputContainer.textContent += decoder.decode(value, { stream: true });
+                terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            }
+        } catch (error) {
+            outputContainer.className = 'error';
+            outputContainer.textContent = `[Stream Error] ${error.message}`;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+        }
+    }
+    
+    commandInput.addEventListener('keypress', async (e) => {
+        if (e.key === 'Enter' && !isCommandRunning) {
+            e.preventDefault();
+            const commandText = commandInput.value.trim();
+            commandInput.value = '';
+            if (commandText === '') { appendToTerminalOutput("", 'prompt'); return; }
+            commandHistory.unshift(commandText);
+            if (commandHistory.length > 50) commandHistory.pop();
+            historyIndex = -1;
+            await handleCommand(commandText);
+        }
+    });
+
+    terminalAbortBtn.addEventListener('click', async () => {
+        if (!isCommandRunning) return;
+        terminalAbortBtn.disabled = true;
+        const result = await sendAjaxRequest('abort_command');
+        setCommandRunning(false); // Manually set state to false to stop stream reader
+        appendToTerminalOutput(result.message || 'Abort signal sent.', 'info');
+        terminalAbortBtn.disabled = false;
+    });
+
+    commandInput.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (commandHistory.length > 0 && historyIndex < commandHistory.length - 1) {
+                historyIndex++; commandInput.value = commandHistory[historyIndex];
+            }
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            if (historyIndex > 0) {
+                historyIndex--; commandInput.value = commandHistory[historyIndex];
+            } else {
+                historyIndex = -1; commandInput.value = '';
+            }
+        }
+    });
+
+    if (document.getElementById('terminal').classList.contains('active')) {
+        appendToTerminalOutput("", 'prompt');
+    }
+
+    // --- File Manager Logic ---
+    async function fetchFiles(path) {
+        fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
+        const result = await sendAjaxRequest('get_file_listing', { path: path });
+
+        // Update Nav
+        driveListContainer.innerHTML = ''; breadcrumbContainer.innerHTML = '';
+        if (result.path) pathInput.value = result.path;
+        if (result.drives && result.drives.length > 0) {
+            result.drives.forEach(drive => {
+                const driveBtn = document.createElement('button');
+                driveBtn.className = 'inputzbut'; driveBtn.textContent = drive + '\\';
+                driveBtn.style.cssText = 'padding:5px 10px; font-size:0.9em;';
+                driveBtn.addEventListener('click', () => fetchFiles(drive + '\\'));
+                driveListContainer.appendChild(driveBtn);
+            });
+        }
+        if (result.breadcrumbs && result.breadcrumbs.length > 0) {
+            const separator = result.ds === '\\' ? '\\' : '/';
+            result.breadcrumbs.forEach((crumb, index) => {
+                const crumbLink = document.createElement('a');
+                crumbLink.href = '#'; crumbLink.textContent = htmlEntities(crumb.name);
+                crumbLink.addEventListener('click', (e) => { e.preventDefault(); fetchFiles(crumb.path); });
+                breadcrumbContainer.appendChild(crumbLink);
+                if (index < result.breadcrumbs.length - 1 && !(separator === '/' && index === 0)) {
+                    const sepSpan = document.createElement('span');
+                    sepSpan.className = 'separator'; sepSpan.textContent = ` ${separator} `;
+                    breadcrumbContainer.appendChild(sepSpan);
+                }
+            });
+        }
+
+        // Update File List
+        fileListingBody.innerHTML = '';
+        if (result.status === 'success') {
+            if (!result.files || result.files.length === 0) {
+                fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Directory is empty.</td></tr>`;
+                return;
+            }
+            result.files.forEach(file => {
+                const row = fileListingBody.insertRow();
+                const fullItemPath = file.full_path;
+                const escFullPath = htmlEntities(fullItemPath);
+                const escFileName = htmlEntities(file.name);
+                
+                let nameCell = `<td><i class="${file.icon_class}" style="color:${file.icon_color};"></i> `;
+                if (file.type === 'dir') {
+                    nameCell += `<a href="#" class="dir-link" data-path="${escFullPath}" style="color:${file.icon_color};">${escFileName}</a></td>`;
+                } else {
+                    nameCell += `<a href="#" class="file-link" data-path="${escFullPath}" data-name="${escFileName}" style="color:${file.icon_color};">${escFileName}</a></td>`;
+                }
+                
+                let actionsCell = '<td>';
+                if (file.name !== '..') {
+                    if (file.type === 'file') {
+                        actionsCell += `<button title="View/Edit" class="action-btn view-btn" data-path="${escFullPath}" data-name="${escFileName}"><i class="fas fa-edit"></i></button>`;
+                        actionsCell += `<a title="Download" class="action-btn" href="?action_get=download_file&path=${encodeURIComponent(fullItemPath)}"><i class="fas fa-download"></i></a>`;
+                    }
+                    actionsCell += `<button title="Rename" class="action-btn rename-btn" data-path="${escFullPath}" data-name="${escFileName}"><i class="fas fa-pencil-alt"></i></button>`;
+                    actionsCell += `<button title="Chmod" class="action-btn chmod-btn" data-path="${escFullPath}" data-perms="${file.perms}" data-name="${escFileName}"><i class="fas fa-shield-halved"></i></button>`;
+                    actionsCell += `<button title="Touch" class="action-btn touch-btn" data-path="${escFullPath}" data-name="${escFileName}"><i class="fas fa-hand-pointer"></i></button>`;
+                    actionsCell += `<button title="Delete" class="action-btn delete-btn" data-path="${escFullPath}" data-name="${escFileName}" data-type="${file.type}"><i class="fas fa-trash-alt"></i></button>`;
+                }
+                actionsCell += '</td>';
+
+                row.innerHTML = `${nameCell}<td>${file.type}</td><td>${file.size}</td><td>${file.owner}</td><td><span style="color:${file.perm_color}; font-weight:bold;">${file.perms}</span></td><td>${file.modified}</td>${actionsCell}`;
+            });
+        } else {
+            fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:red;">${htmlEntities(result.message)}</td></tr>`;
+        }
+    }
+
+    // --- File Manager Event Delegation ---
+    fileListingBody.addEventListener('click', e => {
+        const target = e.target.closest('a, button');
+        if (!target) return;
+        e.preventDefault();
+        const ds = target.dataset;
+        if (target.classList.contains('dir-link')) fetchFiles(ds.path);
+        else if (target.classList.contains('file-link') || target.classList.contains('view-btn')) openModalWithFile(ds.path, ds.name);
+        else if (target.classList.contains('rename-btn')) renameItem(ds.path, ds.name);
+        else if (target.classList.contains('chmod-btn')) chmodItem(ds.path, ds.perms, ds.name);
+        else if (target.classList.contains('touch-btn')) touchItem(ds.path, ds.name);
+        else if (target.classList.contains('delete-btn')) deleteItem(ds.path, ds.name, ds.type);
+    });
+
+    function navigateToInputPath() {
+        const newPath = pathInput.value.trim();
+        if (newPath) fetchFiles(newPath);
+    }
+    goBtn.addEventListener('click', navigateToInputPath);
+    pathInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') navigateToInputPath(); });
+    document.getElementById('file-manager-home-btn').addEventListener('click', () => fetchFiles(scriptHomeDirectory));
+
+    // --- File Operations ---
+    window.openModalWithFile = (filePath, fileName) => {
+        currentEditingFile = filePath;
+        fileModalTitle.textContent = `View/Edit: ${htmlEntities(fileName)}`;
+        fileContentArea.value = 'Loading content...';
+        hideModalMessage(); fileViewModal.classList.add('visible');
+        sendAjaxRequest('get_file_content', { path: filePath }).then(r => {
+            fileContentArea.value = r.status === 'success' ? r.content : `[Error] ${r.message}`;
+        });
+    }
+    closeModalBtn.addEventListener('click', () => fileViewModal.classList.remove('visible'));
+    saveFileBtn.addEventListener('click', async () => {
+        if (!currentEditingFile) return;
+        const result = await sendAjaxRequest('save_file_content', { path: currentEditingFile, content: fileContentArea.value });
+        showModalMessage(result.message || 'Response from server.', result.status);
+    });
+
+    window.renameItem = async (path, name) => {
+        const newName = prompt(`Enter new name for "${name}":`, name);
+        if (newName && newName.trim() !== "" && newName !== name) {
+            const result = await sendAjaxRequest('rename_item', { path, new_name: newName.trim() });
+            showCustomAlert(result.message, result.status);
+            if (result.status === 'success') fetchFiles(currentFileManagerPath);
+        }
+    }
+    window.chmodItem = async (path, perms, name) => {
+        const newPerms = prompt(`Enter new permissions for "${name}" (e.g., 0755):`, perms.slice(-3));
+        if (newPerms?.match(/^[0-7]{3,4}$/)) {
+            const result = await sendAjaxRequest('chmod_item', { path, perms: newPerms.trim() });
+            showCustomAlert(result.message, result.status);
+            if (result.status === 'success') fetchFiles(currentFileManagerPath);
+        } else if (newPerms) showCustomAlert("Invalid permission format.", 'error');
+    }
+    window.touchItem = async (path, name) => {
+        const d = new Date(), ts = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+        const newTimeStr = prompt(`Enter new timestamp for "${name}":`, ts);
+        if (newTimeStr) {
+            const result = await sendAjaxRequest('touch_item', { path, datetime_str: newTimeStr });
+            showCustomAlert(result.message, result.status);
+            if (result.status === 'success') fetchFiles(currentFileManagerPath);
+        }
+    }
+    window.deleteItem = async (path, name, type) => {
+        if (confirm(`Delete ${type} "${name}"? This cannot be undone.`)) {
+            const result = await sendAjaxRequest('delete_item', { path });
+            showCustomAlert(result.message, result.status);
+            if (result.status === 'success') fetchFiles(currentFileManagerPath);
+        }
+    };
+
     document.getElementById('create-file-btn').addEventListener('click', async () => {
         const filename = prompt("Enter new file name:", "newfile.txt");
-        if (filename && filename.trim() !== "") {
+        if (filename?.trim()) {
             const result = await sendAjaxRequest('create_new_file', { path: currentFileManagerPath, name: filename.trim() });
-            showCustomAlert(result.message || 'Response from server.', result.status);
+            showCustomAlert(result.message, result.status);
             if (result.status === 'success') fetchFiles(currentFileManagerPath);
         }
     });
     document.getElementById('create-folder-btn').addEventListener('click', async () => {
         const foldername = prompt("Enter new folder name:", "new_folder");
-        if (foldername && foldername.trim() !== "") {
+        if (foldername?.trim()) {
             const result = await sendAjaxRequest('create_new_folder', { path: currentFileManagerPath, name: foldername.trim() });
-            showCustomAlert(result.message || 'Response from server.', result.status);
+            showCustomAlert(result.message, result.status);
             if (result.status === 'success') fetchFiles(currentFileManagerPath);
         }
     });
 
+    // --- Chunked File Upload Logic ---
+    fileUploadBtn.addEventListener('click', () => fileUploadInput.click());
+    closeUploadModalBtn.addEventListener('click', () => {
+        uploadModal.classList.remove('visible');
+        fetchFiles(currentFileManagerPath); // Refresh file list
+    });
 
+    fileUploadInput.addEventListener('change', async function() {
+        if (this.files.length === 0) return;
+        uploadProgressContainer.innerHTML = '';
+        uploadModal.classList.add('visible');
+
+        const fileList = Array.from(this.files);
+        this.value = ''; // Reset input
+
+        const uploadPromises = fileList.map(file => {
+            const progressItem = createProgressBar(file);
+            return uploadFileInChunks(file, progressItem);
+        });
+        
+        await Promise.all(uploadPromises);
+        showCustomAlert('All uploads finished!', 'success');
+    });
+
+    function createProgressBar(file) {
+        const uploadId = 'upload-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        const item = document.createElement('div');
+        item.className = 'upload-progress-item';
+        item.dataset.uploadId = uploadId;
+        item.dataset.fileName = file.name;
+        
+        item.innerHTML = `
+            <div class="filename">${htmlEntities(file.name)} (${formatBytes(file.size)})</div>
+            <div class="upload-progress-bar-bg">
+                <div class="upload-progress-bar"></div>
+            </div>
+            <div class="upload-progress-info">
+                <span class="status">Pending...</span>
+                <span class="percentage">0%</span>
+            </div>
+        `;
+        uploadProgressContainer.appendChild(item);
+        return item;
+    }
+
+    async function uploadFileInChunks(file, progressItem) {
+        return new Promise((resolve, reject) => {
+            const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            const uploadId = progressItem.dataset.uploadId;
+            let chunkIndex = 0;
+
+            const progressBar = progressItem.querySelector('.upload-progress-bar');
+            const statusEl = progressItem.querySelector('.status');
+            const percentageEl = progressItem.querySelector('.percentage');
+
+            function uploadNextChunk() {
+                if (chunkIndex >= totalChunks) {
+                    statusEl.textContent = '✅ Completed';
+                    statusEl.style.color = '#0f0';
+                    resolve();
+                    return;
+                }
+                
+                const start = chunkIndex * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunk = file.slice(start, end);
+
+                const formData = new FormData();
+                formData.append('ajax_action', 'upload_file_chunk');
+                formData.append('chunk', chunk, file.name);
+                formData.append('upload_target_path', currentFileManagerPath);
+                formData.append('upload_id', uploadId);
+                formData.append('chunk_index', chunkIndex);
+                formData.append('total_chunks', totalChunks);
+                formData.append('original_filename', file.name);
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '<?php echo $_SERVER['PHP_SELF']; ?>', true);
+
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const chunkProgress = (e.loaded / e.total) * 100;
+                        const totalProgress = ((chunkIndex + (e.loaded / e.total)) / totalChunks) * 100;
+                        progressBar.style.width = totalProgress.toFixed(2) + '%';
+                        percentageEl.textContent = totalProgress.toFixed(1) + '%';
+                        statusEl.textContent = `Uploading chunk ${chunkIndex + 1}/${totalChunks}...`;
+                    }
+                };
+                
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            const response = JSON.parse(xhr.responseText);
+                            if (response.status === 'chunk_ok' || response.status === 'success') {
+                                chunkIndex++;
+                                uploadNextChunk();
+                            } else {
+                                throw new Error(response.message || 'Unknown server error during upload.');
+                            }
+                        } catch(e) {
+                             statusEl.textContent = '❌ Error: ' + e.message;
+                             statusEl.style.color = '#f00';
+                             reject(e);
+                        }
+                    } else {
+                        statusEl.textContent = `❌ HTTP Error: ${xhr.statusText}`;
+                        statusEl.style.color = '#f00';
+                        reject(new Error(`HTTP Error: ${xhr.statusText}`));
+                    }
+                };
+
+                xhr.onerror = () => {
+                    statusEl.textContent = '❌ Network Error';
+                    statusEl.style.color = '#f00';
+                    reject(new Error('Network Error during upload.'));
+                };
+
+                xhr.send(formData);
+            }
+
+            uploadNextChunk();
+        });
+    }
+
+
+    // --- Network Tools ---
     const networkResultsArea = document.getElementById('network-results-area');
-
-    async function sendStandardNetworkAjaxRequest(sub_action, data = {}) {
-        networkResultsArea.innerHTML = 'Executing... <i class="fas fa-spinner fa-spin"></i>';
+    async function sendNetworkRequest(formId, sub_action, data, isForeground = false) {
+        networkResultsArea.innerHTML = `Executing${isForeground ? ' (page may hang)' : ''}... <i class="fas fa-spinner fa-spin"></i>`;
         data.sub_action = sub_action;
         const result = await sendAjaxRequest('network_tool', data);
-        if (sub_action === 'port_scan') {
-            networkResultsArea.innerHTML = result.output || result.message || '[Error] Unknown network response.';
-        } else {
-            networkResultsArea.textContent = result.output || result.message || '[Error] Unknown network response.';
-        }
+        const output = result.output || result.message || '[Error] Unknown network response.';
+        networkResultsArea.innerHTML = sub_action === 'port_scan' ? output : htmlEntities(output).replace(/\n/g, '<br>');
     }
-
-    async function sendForegroundNetworkAjaxRequest(sub_action, data = {}) {
-        networkResultsArea.innerHTML = 'Executing (this may take a while and the page will hang)... <i class="fas fa-spinner fa-spin"></i>';
-        data.sub_action = sub_action;
-        const result = await sendAjaxRequest('network_tool', data);
-        networkResultsArea.innerHTML = result.output ? nl2br_js(htmlEntities(result.output)) : nl2br_js(htmlEntities(result.message || '[Error] Unknown network response.'));
-    }
-
-    function nl2br_js (str, is_xhtml) {
-        if (typeof str === 'undefined' || str === null) { return ''; }
-        var breakTag = (is_xhtml || typeof is_xhtml === 'undefined') ? '<br />' : '<br>';
-        return (str + '').replace(/([^>\r\n]?)(\r\n|\n\r|\r|\n)/g, '$1' + breakTag + '$2');
-    }
-
-    document.getElementById('php-bind-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        sendForegroundNetworkAjaxRequest('php_bind', {
-            port: this.elements['port'].value,
-            bind_pass: this.elements['bind_pass'].value
-        });
+    
+    document.getElementById('php-bind-form').addEventListener('submit', (e) => {
+        e.preventDefault(); const data = { port: e.target.elements['port'].value, bind_pass: e.target.elements['bind_pass'].value };
+        sendNetworkRequest(e.target.id, 'php_bind', data, true);
     });
-    document.getElementById('php-back-connect-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        sendForegroundNetworkAjaxRequest('php_back_connect', {
-            ip: this.elements['ip'].value,
-            backport: this.elements['backport'].value
-        });
+    document.getElementById('php-back-connect-form').addEventListener('submit', (e) => {
+        e.preventDefault(); const data = { ip: e.target.elements['ip'].value, backport: e.target.elements['backport'].value };
+        sendNetworkRequest(e.target.id, 'php_back_connect', data, true);
     });
-    document.getElementById('ping-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        sendStandardNetworkAjaxRequest('ping', { host: this.elements['ping_host'].value });
+    document.getElementById('ping-form').addEventListener('submit', (e) => {
+        e.preventDefault(); sendNetworkRequest(e.target.id, 'ping', { host: e.target.elements['ping_host'].value });
     });
-    document.getElementById('dns-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        sendStandardNetworkAjaxRequest('dns', { host: this.elements['dns_host'].value });
+    document.getElementById('dns-form').addEventListener('submit', (e) => {
+        e.preventDefault(); sendNetworkRequest(e.target.id, 'dns', { host: e.target.elements['dns_host'].value });
     });
-    document.getElementById('port-scan-form').addEventListener('submit', function(e) {
-        e.preventDefault();
-        sendStandardNetworkAjaxRequest('port_scan', { 
-            host: this.elements['scan_host'].value,
-            scan_ports: this.elements['scan_ports'].value 
-        });
+    document.getElementById('port-scan-form').addEventListener('submit', (e) => {
+        e.preventDefault(); const data = { host: e.target.elements['scan_host'].value, scan_ports: e.target.elements['scan_ports'].value };
+        sendNetworkRequest(e.target.id, 'port_scan', data);
     });
 
-    if (document.getElementById('filemanager').classList.contains('active') && fileListingBody.innerHTML.includes('Loading...')) {
+    // Initial Load
+    if (document.getElementById('filemanager').classList.contains('active')) {
          fetchFiles(currentFileManagerPath);
     }
 });

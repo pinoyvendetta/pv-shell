@@ -1,8 +1,8 @@
-# PV Advanced Toolkit v1.4.1
+# PV Advanced Toolkit v1.5.0
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
-![image](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif)
+![Toolkit GIF](https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif)
 
 ## Features
 
@@ -13,6 +13,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 ### Core Modules
 * **Interactive Terminal Emulator:**
     * Execute shell commands directly on the server.
+    * **Abort Command:** A new 'Abort' button allows you to terminate long-running commands, similar to pressing `CTRL+C`.
     * Support for long-running commands (e.g., scripts, network tasks) via real-time output streaming, preventing AJAX timeouts.
     * **Intelligent Command Execution:** Automatically finds and uses an available command execution function (`proc_open`, `popen`, `shell_exec`, `system`, `passthru`, `exec`) for maximum compatibility.
     * Command history navigation using Up/Down arrow keys.
@@ -20,11 +21,10 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
     * Renders HTML from server errors (e.g., HTTP 500) directly within the terminal for easier debugging.
 
 * **Advanced File Manager:**
-     * **NEW: Reintroducing the editable path bar navigation below the breadcrumbs and fixing the bug where folders named "0" were being skipped in the breadcrumb display.
-    * **NEW: Breadcrumb Navigation:** Navigate directories easily with clickable breadcrumb links.
-    * **NEW: Drive Detection:** Automatically detects and displays available system drives (e.g., `C:\`, `D:\`) for quick access on Windows servers.
+    * **Large File Support:** Upload files of virtually any size (e.g., 1GB+) thanks to a new chunked uploading mechanism that bypasses PHP's `upload_max_filesize` and `post_max_size` limitations.
+    * **Upload Progress:** Monitor uploads in real-time with individual progress bars for each file.
+    * **Navigation:** Navigate directories easily with clickable breadcrumb links or by typing directly into an editable path bar. Drive detection on Windows for quick access.
     * Browse server directories and view detailed file/folder information (name, type, human-readable size, owner/group, octal permissions, last modified date).
-    * Remembers the last visited directory across page refreshes.
     * **File Operations:**
         * View/Edit text-based files in a modal editor.
         * Download any file directly to your local machine.
@@ -33,25 +33,17 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
         * Update file timestamps (touch).
         * Delete files and folders (with recursive deletion for non-empty folders).
     * **Creation Tools:** Create new empty files and folders.
-    * **File Uploads:** Upload single or multiple files to the current directory via a simple interface.
-    * **Easy Navigation:** Navigate using clickable breadcrumbs and a "Home" button to return to the script's directory.
     * **Visual Icons:** Unique icons for dozens of file types for quick identification.
 
 * **Server Information Panel:**
-    * Displays a comprehensive overview of the server environment.
-    * Includes details on server software, PHP version, OS, CPU info, user info, and critical PHP configurations (`safe_mode`, `disable_functions`, `memory_limit`, etc.).
-    * Shows enabled extensions (cURL, mailer, databases), disk space usage, network details, and more.
+    * Displays a comprehensive overview of the server environment, including software, PHP version, OS, CPU info, user info, critical PHP configurations, disk space, and more.
 
 * **Network Tools:**
-    * **PHP Foreground Port Bind Shell:** Listens on a specified port for incoming connections, providing an interactive shell upon successful password authentication.
-    * **PHP Foreground Back Connect Shell:** Connects back to a specified IP and port to provide an interactive shell.
-    * **Ping Utility:** Sends ICMP echo requests to a specified host.
-    * **DNS Lookup Utility:** Retrieves DNS records for a specified host.
-    * **Port Scanner:** Checks for open TCP ports on a target host. Supports single ports, comma-separated lists, and ranges (e.g., `80,443,8000-8080`).
-    * *(Note: Foreground shells will cause the web page to hang while the connection is active.)*
+    * **PHP Foreground Shells:** Includes Port Bind and Back Connect interactive shells. *(Note: These will cause the web page to hang while active.)*
+    * **Utilities:** Provides Ping, DNS Lookup, and a Port Scanner that supports single ports, comma-separated lists, and ranges (e.g., `80,443,8000-8080`).
 
 * **PHP Info Display:**
-    * Shows the full output of `phpinfo()` in an isolated iframe for detailed PHP environment inspection without cluttering the main interface.
+    * Shows the full output of `phpinfo()` in an isolated iframe for detailed PHP environment inspection.
 
 ## Usage
 
@@ -61,18 +53,18 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 
 2.  **Configuration (Optional):**
     * Edit the PHP file to set your own security parameters.
-    * **Password:** Change the default password by modifying the `$default_password_hash`.
+    * **Password:** Change the default password by modifying the `$default_password_hash`. Find an MD5 generator to hash your new password.
         ```php
         // Default password hash using MD5 for 'myp@ssw0rd'
         $default_password_hash = '2ebba5cd75576c408240e57110e7b4ff';
         ```
     * **IP Whitelisting:** To restrict access to specific IP addresses, populate the `$WHITELISTED_IPS` array.
         ```php
-        $WHITELISTED_IPS = ['192.168.1.10', '127.0.0.1'];
+        $WHITELISTED_IPS = array('192.168.1.10', '127.0.0.1');
         ```
     * **User-Agent Whitelisting:** To restrict access to specific browsers or tools, populate the `$WHITELISTED_USER_AGENTS` array.
         ```php
-        $WHITELISTED_USER_AGENTS = ['MyCustomBrowser', 'SpecialToolAgent'];
+        $WHITELISTED_USER_AGENTS = array('MyCustomBrowser', 'SpecialToolAgent');
         ```
 
 3.  **Login:**
@@ -81,7 +73,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
 
 ## Disclaimer
 
-**FOR ETHICAL USE ONLY.**
+**FOR ETHICAL AND AUTHORIZED USE ONLY.**
 
-This tool is provided for educational and legitimate system administration purposes only. The user is solely responsible for any actions performed using this tool. The author is not responsible or liable for any damage, misuse, or illegal activity caused by this tool. Use at your own risk and ensure you have proper authorization before using it on any system.
+This tool is provided for educational and legitimate system administration purposes. The user is solely responsible for any actions performed using this tool. The author is not responsible or liable for any damage, misuse, or illegal activity. Use at your own risk and ensure you have proper authorization before using it on any system.
 
