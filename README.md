@@ -1,4 +1,4 @@
-# PV Advanced Toolkit v1.4.0
+# PV Advanced Toolkit v1.4.1
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
@@ -20,6 +20,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
     * Renders HTML from server errors (e.g., HTTP 500) directly within the terminal for easier debugging.
 
 * **Advanced File Manager:**
+     * **NEW: Reintroducing the editable path bar navigation below the breadcrumbs and fixing the bug where folders named "0" were being skipped in the breadcrumb display.
     * **NEW: Breadcrumb Navigation:** Navigate directories easily with clickable breadcrumb links.
     * **NEW: Drive Detection:** Automatically detects and displays available system drives (e.g., `C:\`, `D:\`) for quick access on Windows servers.
     * Browse server directories and view detailed file/folder information (name, type, human-readable size, owner/group, octal permissions, last modified date).
