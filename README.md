@@ -1,4 +1,4 @@
-# PV Advanced Toolkit v1.5.0
+# PV Advanced Toolkit v1.6.0
 
 A comprehensive, single-file, PHP-based web shell and server management interface. It's designed for server administrators and security professionals to facilitate system inspection, management, and basic network operations through a user-friendly, retro-themed web interface.
 
@@ -32,8 +32,18 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
         * Change file/folder permissions (chmod).
         * Update file timestamps (touch).
         * Delete files and folders (with recursive deletion for non-empty folders).
-    * **Creation Tools:** Create new empty files and folders.
+    * **Creation Tools:** Create new empty files and new folders.
     * **Visual Icons:** Unique icons for dozens of file types for quick identification.
+
+* **Uncompressor:**
+    * Extract compressed archives directly on the server.
+    * Supports both uploading a compressed file or specifying a path to a file already on the server.
+    * **Supported Formats:** `.zip`, `.tar` (including `.tar.gz`, `.tar.bz2`), `.rar`, `.7z`.
+    * **Dependency-Aware:** Uses built-in PHP classes (`ZipArchive`, `PharData`) where possible and falls back to command-line tools (`unrar`, `7z`) if they are installed on the server. The UI shows which extractors are available.
+
+* **Jumping (Linux Only):**
+    * A server misconfiguration scanner designed for shared hosting environments.
+    * It scans the `/home` directory for other users' `public_html` folders that are incorrectly configured to be readable or writable by the current user.
 
 * **Server Information Panel:**
     * Displays a comprehensive overview of the server environment, including software, PHP version, OS, CPU info, user info, critical PHP configurations, disk space, and more.

