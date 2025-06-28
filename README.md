@@ -34,6 +34,7 @@ A comprehensive, single-file, PHP-based web shell and server management interfac
         * Delete files and folders (with recursive deletion for non-empty folders).
     * **Creation Tools:** Create new empty files and new folders.
     * **Visual Icons:** Unique icons for dozens of file types for quick identification.
+	![Toolkit GIF](https://raw.githubusercontent.com/pinoyvendetta/pv-shell/refs/heads/main/img/file-manager.png)
 
 * **Uncompressor:**
     * Extract compressed archives directly on the server.
